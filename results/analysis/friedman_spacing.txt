@@ -1,0 +1,13 @@
+Friedman-Test für Spacing
+n (Blöcke) = 10, k (Algorithmen) = 4
+Q = 15069.000000
+Tie-Korrektur T = 0.030000
+Qc (korrigiert) = 15535.051546
+p-Wert (Chi^2, df=3) = 0
+Iman–Davenport F = -9.017414, df1=3, df2=27
+p-Wert (F) = 1
+Durchschnittsränge (Rang 1 = besser):
+         SAC: 2.1000
+         A3C: 2.4500
+       NSGA2: 2.5000
+          AL: 2.9500

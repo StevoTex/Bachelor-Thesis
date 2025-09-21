@@ -1,0 +1,13 @@
+{
+  "actor_critic_units": [
+    64,
+    64
+  ],
+  "entropy_beta": 0.009260774398016001,
+  "gamma": 0.9881440914600707,
+  "lr": 0.0004003072254642017,
+  "nsga_rank_weight": 0.8287134647448356,
+  "num_workers": 2,
+  "t_max": 5,
+  "value_loss_factor": 0.4775106764780151
+}

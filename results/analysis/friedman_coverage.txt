@@ -1,0 +1,13 @@
+Friedman-Test für Coverage
+n (Blöcke) = 10, k (Algorithmen) = 4
+Q = 14994.000000
+Tie-Korrektur T = 0.000000
+Qc (korrigiert) = 14994.000000
+p-Wert (Chi^2, df=3) = 0
+Iman–Davenport F = -9.018043, df1=3, df2=27
+p-Wert (F) = 1
+Durchschnittsränge (Rang 1 = besser):
+       NSGA2: 2.1000
+         A3C: 2.5000
+         SAC: 2.7000
+          AL: 2.7000

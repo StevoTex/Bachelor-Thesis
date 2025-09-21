@@ -1,0 +1,8 @@
+{
+  "crossover_prob": 0.8546450412719997,
+  "eta_crossover": 13,
+  "eta_mutation": 20,
+  "lambda_offspring": 2,
+  "pmut": 0.20924145688620424,
+  "pop_size": 20
+}

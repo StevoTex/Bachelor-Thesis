@@ -1,0 +1,20 @@
+{
+  "algorithm_params": {
+    "initial_label_count": 32,
+    "num_cycles": 10,
+    "batch_size": 10,
+    "num_surrogate_models": 3,
+    "nn_learning_rate": 0.001,
+    "nn_hidden_sizes": [64, 64],
+    "exploit_fraction": 0.5,
+    "nsga_rank_weight": 0.8,
+    "step_widths": {
+      "final_drive_ratio": 0.25,
+      "roll_radius": 0.1,
+      "gear5": 0.125,
+      "delta54": 0.125,
+      "delta43": 0.125
+    }
+  }
+}
+

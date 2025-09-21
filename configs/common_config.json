@@ -1,0 +1,33 @@
+{
+  "executable_name": "ConsumptionCar.exe",
+  "evaluation_budget": 100,
+  "seeds": [42, 97, 145, 295, 346, 448, 584, 619, 772, 833],
+  "search_space": [
+    { "name": "final_drive_ratio", "min": 3.0, "max": 5.5 },
+    { "name": "roll_radius",       "min": 0.2, "max": 0.4 },
+    { "name": "gear5",             "min": 0.5, "max": 2.25 },
+    { "name": "delta54",           "min": 0.1, "max": 0.5 },
+    { "name": "delta43",           "min": 0.1, "max": 0.5 }
+  ],
+  "use_constraints": true,
+
+  "objectives": {
+    "consumption": "min",
+    "ela3": "min",
+    "ela4": "min",
+    "ela5": "min"
+  },
+  "lower_bounds": {
+    "consumption": 0.3,
+    "ela3": 0.4,
+    "ela4": 0.5,
+    "ela5": 0.6
+  },
+  "reference_point": {
+    "consumption": 3.0,
+    "ela3": 40.0,
+    "ela4": 50.0,
+    "ela5": 60.0
+  },
+  "hv_mode": "exact"
+}

@@ -1,0 +1,20 @@
+{
+  "actor_units": [
+    128,
+    128
+  ],
+  "auto_alpha": true,
+  "batch_size": 16,
+  "critic_units": [
+    128,
+    128
+  ],
+  "gamma": 0.992992713510561,
+  "initial_random_steps": 5,
+  "lr_actor": 0.0003699198563148567,
+  "lr_alpha": 1.501949057237435e-05,
+  "lr_critic": 0.0002774475234286663,
+  "memory_capacity": 20000,
+  "nsga_rank_weight": 0.7538128690116143,
+  "tau": 0.010933882368590038
+}

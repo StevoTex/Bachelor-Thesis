@@ -1,0 +1,118 @@
+{
+  "global": {
+    "seed": 42,
+    "metric": "normalized_hypervolume",
+    "seeds_per_trial": 10,
+    "seeds_for_trial": [42, 97, 145, 295, 346, 448, 584, 619, 772, 833],
+    "optuna": {
+      "sampler": "TPE",
+      "pruner": "Median",
+      "storage": "sqlite:///results/optuna_hv_tuning.db"
+    }
+  },
+
+  "trials": {
+    "A3C": 10,
+    "SAC": 10,
+    "NSGA2": 10,
+    "AL": 10
+  },
+
+  "A3C": {
+    "defaults": {
+      "lr": 0.0003,
+      "gamma": 0.99,
+      "t_max": 4,
+      "num_workers": 2,
+      "actor_critic_units": [128, 128],
+      "value_loss_factor": 0.5,
+      "entropy_beta": 0.01,
+      "nsga_rank_weight": 0.8
+    },
+    "search_space": {
+      "lr":                 { "type": "logfloat", "low": 1.5e-4, "high": 6e-4 },
+      "gamma":              { "type": "float",    "low": 0.988,  "high": 0.995 },
+      "t_max":              { "type": "int",      "low": 3,      "high": 5 },
+      "num_workers":        { "type": "int",      "low": 1,      "high": 2 },
+      "actor_critic_units": { "type": "categorical", "choices": [[64,64],[128,128]] },
+      "value_loss_factor":  { "type": "float",    "low": 0.45,   "high": 0.60 },
+      "entropy_beta":       { "type": "logfloat", "low": 7.5e-3, "high": 1.5e-2 },
+      "nsga_rank_weight":   { "type": "float",    "low": 0.75,   "high": 0.90 }
+    }
+  },
+
+  "SAC": {
+    "defaults": {
+      "lr_actor": 0.0003,
+      "lr_critic": 0.0003,
+      "lr_alpha": 0.0001,
+      "gamma": 0.99,
+      "tau": 0.01,
+      "batch_size": 16,
+      "memory_capacity": 20000,
+      "actor_units": [128, 128],
+      "critic_units": [128, 128],
+      "auto_alpha": true,
+      "alpha": 0.2,
+      "initial_random_steps": 10,
+      "nsga_rank_weight": 0.8
+    },
+    "search_space": {
+      "lr_actor":             { "type": "logfloat", "low": 2e-4,  "high": 4e-4 },
+      "lr_critic":            { "type": "logfloat", "low": 2e-4,  "high": 4e-4 },
+      "lr_alpha":             { "type": "logfloat", "low": 1e-5,  "high": 3e-4 },
+      "gamma":                { "type": "float",    "low": 0.988, "high": 0.995 },
+      "tau":                  { "type": "logfloat", "low": 4e-3,  "high": 1.5e-2 },
+      "batch_size":           { "type": "categorical", "choices": [16] },
+      "memory_capacity":      { "type": "categorical", "choices": [20000] },
+      "actor_units":          { "type": "categorical", "choices": [[64,64],[128,128]] },
+      "critic_units":         { "type": "categorical", "choices": [[64,64],[128,128]] },
+      "auto_alpha":           { "type": "categorical", "choices": [true] },
+      "initial_random_steps": { "type": "int", "low": 5, "high": 10, "step": 5 },
+      "nsga_rank_weight":     { "type": "float", "low": 0.75, "high": 0.90 }
+    }
+  },
+
+  "NSGA2": {
+    "defaults": {
+      "pop_size": 20,
+      "lambda_offspring": 2,
+      "eta_crossover": 15,
+      "eta_mutation": 20,
+      "pmut": 0.2,
+      "crossover_prob": 0.9,
+      "use_constraints": true
+    },
+    "search_space": {
+      "pop_size":         { "type": "int",   "low": 16,  "high": 24, "step": 4 },
+      "lambda_offspring": { "type": "int",   "low": 1,   "high": 2 },
+      "eta_crossover":    { "type": "int",   "low": 12,  "high": 20 },
+      "eta_mutation":     { "type": "int",   "low": 15,  "high": 25 },
+      "pmut":             { "type": "float", "low": 0.15,"high": 0.25 },
+      "crossover_prob":   { "type": "float", "low": 0.85,"high": 0.95 }
+    }
+  },
+
+  "AL": {
+    "defaults": {
+      "initial_label_count": 32,
+      "num_cycles": 10,
+      "batch_size": 10,
+      "num_surrogate_models": 3,
+      "nn_learning_rate": 0.001,
+      "nn_hidden_sizes": [64, 64],
+      "exploit_fraction": 0.5,
+      "nsga_rank_weight": 0.8
+    },
+    "search_space": {
+      "initial_label_count":  { "type": "int",      "low": 24,  "high": 32 },
+      "num_cycles":           { "type": "int",      "low": 6,   "high": 10 },
+      "batch_size":           { "type": "int",      "low": 6,   "high": 10 },
+      "num_surrogate_models": { "type": "categorical", "choices": [1, 3] },
+      "nn_learning_rate":     { "type": "logfloat", "low": 3e-4, "high": 1.5e-3 },
+      "nn_hidden_sizes":      { "type": "categorical", "choices": [[32,32],[64,64]] },
+      "exploit_fraction":     { "type": "float",    "low": 0.45, "high": 0.60 },
+      "nsga_rank_weight":     { "type": "float",    "low": 0.75, "high": 0.90 }
+    }
+  }
+}

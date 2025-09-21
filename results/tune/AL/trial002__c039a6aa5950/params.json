@@ -1,0 +1,13 @@
+{
+  "batch_size": 10,
+  "exploit_fraction": 0.5147917527963174,
+  "initial_label_count": 24,
+  "nn_hidden_sizes": [
+    64,
+    64
+  ],
+  "nn_learning_rate": 0.00040300970604102883,
+  "nsga_rank_weight": 0.7936843710297063,
+  "num_cycles": 10,
+  "num_surrogate_models": 1
+}
