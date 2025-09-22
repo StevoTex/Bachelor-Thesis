@@ -3,32 +3,28 @@ from __future__ import annotations
 """
 Benchmark analysis & plots for multi-objective experiments.
 
-Clean plotting:
-- No plot titles.
-- No "(↑ better)/(↓ better)" comments in axis labels.
-
 Functional highlights:
 - Works with per-algorithm *all_runs* CSVs (multiple seeds in one file).
 - Robust HV curves (per-seed filtering, dedup per 'evaluation', strict bounds via metrics.py).
 - HV(t) hard-cut at 100 evaluations, with padding per seed to reach 100.
-- Spacing & Diversität (Coverage) plots (bar + box; Bar/Box absteigend nach Mittelwert sortiert).
-- Report der Anzahl gefundener Pareto-Lösungen (Kompromisslösungen) je Seed + Union über Seeds.
-- Epsilon- und gerichtete Hypervolume-Improvement-Heatmaps (HVI).
-- Friedman-Tests (Durchschnittsränge) für HV, Spacing, Coverage und Zeit (mit Tie-Korrektur + Iman–Davenport).
-- Linien-Plot je Algorithmus mit allen Union-Pareto-Lösungen (x: Ziele, y: Werte).
-- ZEIT: wall_time_s ist pro Seed die **Gesamtlaufzeit**. Pro Algo wird der
-  **Durchschnitt über alle 10 Seeds** als (Summe der Seed-Zeiten) / 10 berechnet – OHNE Filter.
+- Spacing & Diversity (Coverage) plots (bar + box; bars/boxes sorted by mean desc).
+- Report of the number of Pareto solutions per seed + union over seeds.
+- Directed hypervolume-improvement heatmap (HVI) only (ε heatmap removed).
+- Friedman (average ranks only) for HV, Spacing, Coverage, and Time.
+- TIME: wall_time_s is the **total runtime per seed**. Per algorithm, the
+  **average over 10 seeds** is computed as (sum of seed times) / 10 — without filtering.
 
-Analyse-Erweiterungen:
-- Übersichtstabelle HV pro Seed (Seeds = Spalten, Algorithmen = Zeilen): hv_per_seed_matrix.csv
-- Pro Algorithmus eine CSV mit PF-Punkten je Seed + Counts „negativ“ und „out_of_box“: <algo>/<algo>_pf_summary.csv
-- Pareto-Profile pro Seed (Linienplot) + Union-Profile pro Algorithmus
+Analysis extras:
+- Overview table HV per seed (seeds = columns, algorithms = rows): hv_per_seed_matrix.csv
+- Per algorithm a CSV with PF points per seed + counts “negativ” and “out_of_box”:
+  <algo>/<algo>_pf_summary.csv
+- Pareto profiles per seed (line plot) + union profiles per algorithm
 
 Assumptions:
 - CSV logs include at least: ["algo","seed","evaluation", objectives...].
-- "phase" may include "update" rows; those are excluded in metrics.hv_curve_over_evals (nur für HV(t)).
-- Invalid simulator outputs (NaN/inf/negative/out-of-bounds) werden von den Metrik-Helpern gefiltert (nicht für die Zeit).
-- Es sind **immer genau 10 Seeds** pro Algorithmus vorhanden.
+- "phase" may include "update" rows; those are excluded in metrics.hv_curve_over_evals (only for HV(t)).
+- Invalid simulator outputs (NaN/inf/negative/out-of-bounds) are filtered by metric helpers (not for time).
+- Exactly **10 seeds** per algorithm are present.
 
 Outputs go to: <results_dir>/<out_subdir>/
 """
@@ -51,13 +47,12 @@ from src.metrics import (
     metric_maximum_spread,
     hv_curve_over_evals,          # robust, dedups per evaluation, excludes 'update'
     evals_to_reach_fraction,
-    epsilon_indicator,
 )
 
 # ---- Global constants ----
-# Für Profilplots explizite Zielreihenfolge:
+# For profile plots use an explicit objective order:
 ORDERED_OBJ_COLS = ["ela3", "ela4", "ela5", "consumption"]
-OBJ_COLS = ["consumption", "ela3", "ela4", "ela5"]  # Log-Spaltennamen beibehalten
+OBJ_COLS = ["consumption", "ela3", "ela4", "ela5"]  # keep log column names
 ALGO_ALIASES = {
     "GA": "NSGA2",
     "NSGA-II": "NSGA2",
@@ -71,9 +66,9 @@ ALGO_ALIASES = {
 }
 DEFAULT_ALGOS = ["A3C", "SAC", "AL", "NSGA2"]
 
-# HV(t) Cutoff & Seeds
+# HV(t) cutoff & seeds
 HV_EVALS_CUTOFF = 100
-N_SEEDS_PER_ALGO = 10  # hartkodiert
+N_SEEDS_PER_ALGO = 10  # hard-coded
 
 
 # ------------------------------- Config I/O ---------------------------------
@@ -163,7 +158,7 @@ def _latest_by_algo_seed(csv_paths: List[str]) -> Dict[Tuple[str, int], str]:
 # ----------------------------- Data preparation -----------------------------
 
 def _valid_eval_mask(df: pd.DataFrame, obj_cols: List[str], bounds: Optional[Dict[str, Tuple[float, float]]]) -> np.ndarray:
-    """Gültige Zeilen: nicht phase=='update', endliche Ziele, >=0, innerhalb der Bounds."""
+    """Valid rows: not phase=='update', finite objectives, >= 0, inside bounds."""
     mask = np.ones(len(df), dtype=bool)
     if "phase" in df.columns:
         mask &= df["phase"].astype(str).str.lower() != "update"
@@ -185,10 +180,7 @@ def _valid_eval_mask(df: pd.DataFrame, obj_cols: List[str], bounds: Optional[Dic
 # -------------------------- HV(t) alignment to 1..100 -----------------------
 
 def _clip_and_pad_to_cutoff(s: pd.Series) -> pd.Series:
-    """
-    HV-Reihe auf [1..HV_EVALS_CUTOFF] beschneiden und via ffill/bfill auffüllen,
-    sodass die Länge genau HV_EVALS_CUTOFF beträgt.
-    """
+    """Clip HV series to [1..HV_EVALS_CUTOFF] and pad via ffill/bfill to exact length."""
     if s is None or s.empty:
         return pd.Series(index=pd.Index(range(1, HV_EVALS_CUTOFF + 1), name="evals"), dtype=float)
 
@@ -209,9 +201,7 @@ def _clip_and_pad_to_cutoff(s: pd.Series) -> pd.Series:
 
 
 def _align_series_mean(series_by_seed: Dict[int, pd.Series]) -> Tuple[pd.Index, pd.Series, int, int]:
-    """
-    Auf den festen Bereich 1..HV_EVALS_CUTOFF ausrichten (kein Common-Prefix-Abbruch).
-    """
+    """Align all seed series to 1..HV_EVALS_CUTOFF (no common-prefix truncation)."""
     idx = pd.Index(range(1, HV_EVALS_CUTOFF + 1), name="evals")
     if not series_by_seed:
         return idx, pd.Series(index=idx, dtype=float), HV_EVALS_CUTOFF, HV_EVALS_CUTOFF
@@ -225,26 +215,19 @@ def _align_series_mean(series_by_seed: Dict[int, pd.Series]) -> Tuple[pd.Index, 
 # ------------------------------- Time handling ------------------------------
 
 def _seed_total_time_s(df: pd.DataFrame) -> float:
-    """
-    Gesamtlaufzeit pro Seed (Sekunden) – OHNE Filter/Tricks.
-    Annahme: 'wall_time_s' hat in jeder Zeile **denselben** Wert (Gesamtlaufzeit).
-    """
+    """Total runtime per seed (seconds) — no filtering/tricks. Uses max(wall_time_s)."""
     if "wall_time_s" not in df.columns:
         return float("nan")
     vals = pd.to_numeric(df["wall_time_s"], errors="coerce").dropna()
     if vals.empty:
         return float("nan")
-    return float(vals.max())  # konstant pro Seed
+    return float(vals.max())
 
 
 # ------------------------------- Counting helpers ---------------------------
 
 def _counts_neg_and_oob_unique(df: pd.DataFrame, bounds: Optional[Dict[str, Tuple[float, float]]]) -> Tuple[int, int]:
-    """
-    Zählt über **eindeutige** Zielvektoren im Seed:
-      - neg_vectors_total: Vektoren mit ≥1 negativer Komponente
-      - out_of_box_total: Vektoren außerhalb der Target-Box (lo/hi je Ziel)
-    """
+    """Over unique objective vectors in the seed: count negatives and out-of-bounds."""
     if not set(OBJ_COLS).issubset(df.columns):
         return 0, 0
     Z = df[OBJ_COLS].apply(pd.to_numeric, errors="coerce").dropna().drop_duplicates()
@@ -271,9 +254,7 @@ def _ensure_dir(path: str) -> None:
 
 
 def _bar_chart(values: Dict[str, float], ylabel: str, out_path: str) -> None:
-    """
-    Balkendiagramm absteigend nach Wert sortieren. NaN/Inf werden verworfen.
-    """
+    """Bar chart sorted by value desc; drops NaN/Inf."""
     pairs = [(k, float(v)) for k, v in values.items() if np.isfinite(v)]
     if not pairs:
         return
@@ -290,10 +271,7 @@ def _bar_chart(values: Dict[str, float], ylabel: str, out_path: str) -> None:
 
 
 def _box_plot(series_dict: Dict[str, List[float]], ylabel: str, out_path: str) -> None:
-    """
-    Boxplot absteigend nach Mittelwert sortieren (NaNs ignorieren).
-    Leere Reihen werden übersprungen.
-    """
+    """Box plot sorted by mean desc; skips empty series."""
     stats = []
     for k, v in series_dict.items():
         arr = np.array(v, dtype=float)
@@ -315,7 +293,7 @@ def _box_plot(series_dict: Dict[str, List[float]], ylabel: str, out_path: str) -
 
 
 def _heatmap(matrix: pd.DataFrame, out_path: str, cbar_label: str = "", value_fmt: str = "%.2f") -> None:
-    # Mehr Rand, damit Labels nicht abgeschnitten werden
+    """Simple matrix heatmap with inline annotations."""
     plt.figure(figsize=(8.6, 6.2), constrained_layout=True)
     plt.imshow(matrix.values, cmap="viridis")
     plt.xticks(range(len(matrix.columns)), matrix.columns, rotation=45, ha="right")
@@ -344,7 +322,7 @@ def _heatmap(matrix: pd.DataFrame, out_path: str, cbar_label: str = "", value_fm
 
 
 def _plot_hv_all_seeds(algo: str, curves: Dict[int, pd.Series], out_dir: str) -> None:
-    """HV(t) je Seed (auf 1..HV_EVALS_CUTOFF ausgerichtet) + dicker schwarzer Mittelwert."""
+    """HV(t) per seed aligned to 1..HV_EVALS_CUTOFF + bold black mean."""
     _ensure_dir(out_dir)
     idx, mean, _, _ = _align_series_mean(curves)
     plt.figure(figsize=(7.5, 4.3), constrained_layout=True)
@@ -365,7 +343,7 @@ def _plot_hv_all_seeds(algo: str, curves: Dict[int, pd.Series], out_dir: str) ->
 
 
 def _plot_hv_mean_only(algo: str, curves: Dict[int, pd.Series], out_dir: str) -> None:
-    """Nur der dicke schwarze Mittelwert von HV(t) auf 1..HV_EVALS_CUTOFF."""
+    """Mean-only HV(t) curve aligned to 1..HV_EVALS_CUTOFF."""
     _ensure_dir(out_dir)
     idx, mean, _, _ = _align_series_mean(curves)
     plt.figure(figsize=(7.5, 4.0), constrained_layout=True)
@@ -380,10 +358,7 @@ def _plot_hv_mean_only(algo: str, curves: Dict[int, pd.Series], out_dir: str) ->
 
 
 def _plot_union_pareto_profiles(algo: str, pf_union: pd.DataFrame, out_dir: str) -> None:
-    """
-    Zeichnet für jeden Union-Pareto-Punkt eine Linie über die Ziele (ORDERED_OBJ_COLS).
-    x: Zielvariablen, y: Werte (Originalskalen). Dateien pro Algorithmus in dessen Ordner.
-    """
+    """Line-profile per union-Pareto point across ORDERED_OBJ_COLS (original scales)."""
     _ensure_dir(out_dir)
     obj_order = [c for c in ORDERED_OBJ_COLS if c in pf_union.columns]
     if not obj_order:
@@ -407,9 +382,7 @@ def _plot_union_pareto_profiles(algo: str, pf_union: pd.DataFrame, out_dir: str)
 
 
 def _plot_pareto_profile_for_seed(algo: str, seed: int, pf_seed: pd.DataFrame, out_dir: str) -> None:
-    """
-    Pareto-Profile **pro Seed**: jede PF-Lösung als Linie über ORDERED_OBJ_COLS.
-    """
+    """Pareto profiles per seed: each PF solution as a line over ORDERED_OBJ_COLS."""
     _ensure_dir(out_dir)
     obj_order = [c for c in ORDERED_OBJ_COLS if c in pf_seed.columns]
     if not obj_order:
@@ -434,7 +407,7 @@ def _plot_pareto_profile_for_seed(algo: str, seed: int, pf_seed: pd.DataFrame, o
 # -------------------------- Statistics (Friedman) ---------------------------
 
 def _average_ranks(row: np.ndarray, higher_is_better: bool) -> np.ndarray:
-    """Durchschnittsränge (Ties -> Mittelwert). Rang 1 = beste Leistung."""
+    """Average ranks with ties (rank 1 = best)."""
     x = row.copy().astype(float)
     if higher_is_better:
         x = -x
@@ -448,16 +421,15 @@ def _average_ranks(row: np.ndarray, higher_is_better: bool) -> np.ndarray:
     return avg[inv]
 
 
-def _friedman_test(per_algo_seed_values: Dict[str, Dict[int, float]],
-                   algos_order: List[str],
-                   metric_name: str,
-                   out_dir: str,
-                   higher_is_better: bool = True) -> None:
+def _friedman_ranks_only(per_algo_seed_values: Dict[str, Dict[int, float]],
+                         algos_order: List[str],
+                         metric_name: str,
+                         out_dir: str,
+                         higher_is_better: bool = True) -> None:
     """
-    Friedman-Test über Algorithmen (nur gemeinsame Seeds mit FINITEN Werten).
-    - Tie-Korrektur (Conover): Qc = Q / (1 - T), T = sum_i sum_g (t_ig^3 - t_ig) / (n*(k^3 - k))
-    - Zusätzlich Iman–Davenport F-Approx.: F_F = ((n-1)*Qc) / (n*(k-1) - Qc)
-    Speichert Durchschnittsränge und Teststatistiken.
+    Compute **average ranks only** (no test statistics). Writes CSV:
+      friedman_ranks_<metric>.csv with columns [Algorithmus, Durchschnittsrang]
+    over common seeds with finite values across all algorithms.
     """
     seed_sets = [set(per_algo_seed_values[a].keys()) for a in algos_order]
     common = set.intersection(*seed_sets) if seed_sets else set()
@@ -468,60 +440,18 @@ def _friedman_test(per_algo_seed_values: Dict[str, Dict[int, float]],
     common = sorted([s for s in common if all(_finite(a, s) for a in algos_order)])
 
     if len(common) < 2 or len(algos_order) < 2:
-        print(f"[FRIEDMAN] Nicht genug Blöcke/Algorithmen für {metric_name} (nach NaN-Filter).")
+        print(f"[FRIEDMAN-RANKS] Not enough blocks/algorithms for {metric_name} after NaN filtering.")
         return
 
-    # Matrix (n x k)
     X = np.array([[per_algo_seed_values[a][s] for a in algos_order] for s in common], dtype=float)
-
-    # Ränge je Block
     ranks = np.vstack([_average_ranks(X[i, :], higher_is_better) for i in range(X.shape[0])])
     avg_ranks = np.mean(ranks, axis=0)
-
-    n, k = X.shape
-    Rj = np.sum(ranks, axis=0)
-    Q = (12 * n / (k * (k + 1))) * np.sum(Rj ** 2) - 3 * n * (k + 1)
-
-    # Tie-Korrektur-Term T
-    T_num = 0.0
-    for i in range(n):
-        xi = X[i, :].astype(float)
-        if higher_is_better:
-            xi = -xi  # Ties bleiben Ties unter Negation
-        _, counts = np.unique(xi, return_counts=True)
-        T_num += np.sum(counts**3 - counts)
-    denom = n * (k**3 - k)
-    T = (T_num / denom) if denom != 0 else 0.0
-    Qc = Q / (1.0 - T) if (1.0 - T) > 1e-12 else np.nan
-
-    try:
-        import scipy.stats as _st
-        p_chi2 = float(_st.chi2.sf(Qc, df=k - 1)) if np.isfinite(Qc) else float("nan")
-        # Iman–Davenport:
-        F_id = ((n - 1) * Qc) / (n * (k - 1) - Qc) if np.isfinite(Qc) else float("nan")
-        p_F = float(_st.f.sf(F_id, dfn=k - 1, dfd=(k - 1) * (n - 1))) if np.isfinite(F_id) else float("nan")
-    except Exception:
-        p_chi2, F_id, p_F = float("nan"), float("nan"), float("nan")
 
     ranks_df = pd.DataFrame({"Algorithmus": algos_order, "Durchschnittsrang": avg_ranks})
     ranks_df = ranks_df.sort_values("Durchschnittsrang")
     ranks_path = os.path.join(out_dir, f"friedman_ranks_{metric_name.lower()}.csv")
     ranks_df.to_csv(ranks_path, index=False, float_format="%.6f")
-
-    with open(os.path.join(out_dir, f"friedman_{metric_name.lower()}.txt"), "w") as f:
-        f.write(f"Friedman-Test für {metric_name}\n")
-        f.write(f"n (Blöcke) = {n}, k (Algorithmen) = {k}\n")
-        f.write(f"Q = {Q:.6f}\n")
-        f.write(f"Tie-Korrektur T = {T:.6f}\n")
-        f.write(f"Qc (korrigiert) = {Qc:.6f}\n")
-        f.write(f"p-Wert (Chi^2, df={k-1}) = {p_chi2:.6g}\n")
-        f.write(f"Iman–Davenport F = {F_id:.6f}, df1={k-1}, df2={(k-1)*(n-1)}\n")
-        f.write(f"p-Wert (F) = {p_F:.6g}\n")
-        f.write("Durchschnittsränge (Rang 1 = besser):\n")
-        for a, r in zip(ranks_df["Algorithmus"], ranks_df["Durchschnittsrang"]):
-            f.write(f"  {a:>10s}: {r:.4f}\n")
-
-    print(f"[FRIEDMAN] {metric_name}: Q={Q:.4f}, Qc={Qc:.4f}, p_chi2={p_chi2:.3g}, F={F_id:.3g}, p_F={p_F:.3g}  -> {ranks_path}")
+    print(f"[FRIEDMAN-RANKS] Saved ranks for {metric_name} -> {ranks_path}")
 
 
 # ------------------------------- Benchmark core -----------------------------
@@ -575,10 +505,10 @@ def run_benchmarks(
     per_algo_seed_negcnt: Dict[str, Dict[int, int]] = defaultdict(dict)
     per_algo_seed_oobcnt: Dict[str, Dict[int, int]] = defaultdict(dict)
 
-    # Für PF-CSV pro Algo sammeln wir Zeilen:
+    # PF CSV rows per algorithm:
     pf_summary_rows_by_algo: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
 
-    # Für Union-Front Sammeln:
+    # Union-DF for HVI:
     per_algo_union_df: Dict[str, pd.DataFrame] = defaultdict(lambda: pd.DataFrame(columns=OBJ_COLS))
 
     for (algo, seed), path in sorted(latest_map.items()):
@@ -588,31 +518,30 @@ def run_benchmarks(
             print(f"  - Could not read {path}: {e}")
             continue
 
-        # Subset auf aktuellen Seed
+        # Subset by seed
         if "seed" in df.columns and seed is not None:
             try:
                 df = df[df["seed"].astype(int) == int(seed)].copy()
             except Exception:
                 df = df[df["seed"] == seed].copy()
 
-        # Algo-Namen normalisieren
+        # Normalize algo name
         if "algo" in df.columns and not df.empty:
             df.loc[:, "algo"] = ALGO_ALIASES.get(str(df["algo"].iloc[0]).upper(), str(df["algo"].iloc[0]).upper())
 
-        # Basic checks
         if df.empty or not set(OBJ_COLS).issubset(df.columns):
             print(f"  - Skipping {path} (missing objectives or empty) for seed {seed}.")
             continue
 
-        # --- Zeit (OHNE Filter) ---
+        # Time (NO filtering)
         per_algo_seed_time[algo][seed] = _seed_total_time_s(df)
 
-        # --- Negativ-/Out-of-Box-Zählung (über **eindeutige** Zielvektoren aus dem Seed) ---
+        # Negative / out-of-box counts (unique objective vectors)
         neg_cnt, oob_cnt = _counts_neg_and_oob_unique(df, bounds)
         per_algo_seed_negcnt[algo][seed] = neg_cnt
         per_algo_seed_oobcnt[algo][seed] = oob_cnt
 
-        # --- HV(t) (exkl. 'update' intern, dedup pro evaluation) ---
+        # HV(t) (excludes 'update' internally, dedup per evaluation)
         curve = hv_curve_over_evals(df, objectives, reference_point, hv_mode_cfg, stride=stride, bounds=bounds)
         if not curve.empty:
             try:
@@ -622,7 +551,7 @@ def run_benchmarks(
             curve = curve[curve.index <= HV_EVALS_CUTOFF]
         per_algo_seed_curves[algo][seed] = curve
 
-        # --- PF & Metriken (bounds-aware) ---
+        # PF & metrics (bounds-aware)
         pf = extract_pareto_front(df, objectives, bounds=bounds)
         hv_val = float(metric_hypervolume(pf, objectives, reference_point, hv_mode=modes[0], bounds=bounds))
         cov_val = float(metric_diversity_measure(pf, objectives, bounds=bounds))
@@ -631,7 +560,7 @@ def run_benchmarks(
         per_algo_seed_cov[algo][seed] = cov_val
         per_algo_seed_spacing[algo][seed] = sp_val
 
-        # --- Anzahl Pareto-Lösungen je Seed ---
+        # PF count per seed
         try:
             pf_unique = pf[OBJ_COLS].drop_duplicates()
             pf_count = int(len(pf_unique))
@@ -639,7 +568,7 @@ def run_benchmarks(
             pf_count = int(len(pf))
         per_algo_seed_pfcount[algo][seed] = pf_count
 
-        # --- PF-Zeilen für Zusammenfassungs-CSV (pro Algo) ---
+        # PF rows for per-algo CSV
         if pf is None or pf.empty:
             pf_summary_rows_by_algo[algo].append({
                 "seed": int(seed),
@@ -661,11 +590,11 @@ def run_benchmarks(
                 }
                 pf_summary_rows_by_algo[algo].append(row)
 
-        # --- Pareto-Profile pro Seed ---
+        # Pareto profiles per seed
         algo_dir = os.path.join(out_dir, algo)
         _plot_pareto_profile_for_seed(algo, int(seed), pf, algo_dir)
 
-        # --- Evals bis x% HV ---
+        # Evals to x% HV
         try:
             evals95 = int(evals_to_reach_fraction(df, objectives, reference_point, hv_mode_cfg,
                                                   frac=frac, stride=stride, bounds=bounds))
@@ -673,16 +602,16 @@ def run_benchmarks(
             evals95 = 0
         per_algo_seed_evals95[algo][seed] = evals95
 
-        # --- Union DF für Epsilon/HVI ---
+        # Union DF for HVI
         per_algo_union_df[algo] = pd.concat([per_algo_union_df[algo], df[OBJ_COLS]], axis=0, ignore_index=True)
 
-    # Algorithmen setzen (nur erkannte)
+    # Algorithms present (keep order)
     algos_present = [a for a in DEFAULT_ALGOS if a in per_algo_seed_hv]
     if not algos_present:
         print("No recognized algorithms found in results.")
         return
 
-    # --- PF-CSV je Algorithmus speichern ---
+    # PF CSV per algorithm
     for a in algos_present:
         algo_dir = os.path.join(out_dir, a)
         _ensure_dir(algo_dir)
@@ -690,7 +619,7 @@ def run_benchmarks(
         df_pf = pd.DataFrame(pf_summary_rows_by_algo[a], columns=cols)
         df_pf.to_csv(os.path.join(algo_dir, f"{a}_pf_summary.csv"), index=False)
 
-    # --- HV pro Seed Matrix (Seeds = Spalten, Algos = Zeilen) ---
+    # HV-per-seed matrix
     all_seeds_sorted = sorted({s for a in algos_present for s in per_algo_seed_hv[a].keys()})
     hv_mat = pd.DataFrame(index=algos_present, columns=all_seeds_sorted, dtype=float)
     for a in algos_present:
@@ -698,13 +627,13 @@ def run_benchmarks(
             hv_mat.loc[a, s] = float(v)
     hv_mat.to_csv(os.path.join(out_dir, "hv_per_seed_matrix.csv"), float_format="%.8f")
 
-    # --- Plots per algorithm ---
+    # Plots per algorithm
     for algo in algos_present:
         algo_dir = os.path.join(out_dir, algo)
         _plot_hv_all_seeds(algo, per_algo_seed_curves[algo], algo_dir)
         _plot_hv_mean_only(algo, per_algo_seed_curves[algo], algo_dir)
 
-    # --- Aggregated metrics across algorithms ---
+    # Aggregated metrics
     mean_hv         = {a: float(np.nanmean(list(per_algo_seed_hv[a].values()))) for a in algos_present}
     std_hv          = {a: float(np.nanstd (list(per_algo_seed_hv[a].values()), ddof=0)) for a in algos_present}
     var_hv          = {a: float(np.nanvar (list(per_algo_seed_hv[a].values()), ddof=0)) for a in algos_present}
@@ -715,7 +644,7 @@ def run_benchmarks(
 
     mean_spacing    = {a: float(np.nanmean(list(per_algo_seed_spacing[a].values()))) for a in algos_present}
 
-    # WICHTIG: Durchschnittliche Laufzeit pro Run = (Summe der Seed-Zeiten) / 10 (hartkodiert)
+    # Average runtime per run = (sum of seed times) / 10 (hard-coded)
     time_lists      = {a: list(per_algo_seed_time[a].values()) for a in algos_present}
     mean_time       = {a: float(np.nansum(time_lists[a]) / N_SEEDS_PER_ALGO) for a in algos_present}
     std_time        = {a: float(np.nanstd (time_lists[a], ddof=0)) for a in algos_present}
@@ -723,16 +652,16 @@ def run_benchmarks(
 
     mean_evals95    = {a: float(np.nanmean(list(per_algo_seed_evals95[a].values()))) for a in algos_present}
 
-    # Ø Pareto-Lösungen/Seed – robust: Summe / 10 (hartkodiert)
+    # Ø Pareto solutions / seed — robust: sum / 10 (hard-coded)
     pfcount_lists   = {a: list(per_algo_seed_pfcount[a].values()) for a in algos_present}
     mean_pfcount    = {a: float(np.nansum(pfcount_lists[a]) / N_SEEDS_PER_ALGO) for a in algos_present}
 
-    # Für Plots
+    # For plots
     hv_lists        = {a: list(per_algo_seed_hv[a].values())       for a in algos_present}
     coverage_lists  = {a: list(per_algo_seed_cov[a].values())      for a in algos_present}
     spacing_lists   = {a: list(per_algo_seed_spacing[a].values())  for a in algos_present}
 
-    # --- Union-Pareto-Lösungen pro Algorithmus + Linienplots ---
+    # Union Pareto per algorithm + profiles
     union_pf_counts: Dict[str, int] = {}
     for a in algos_present:
         df_all = per_algo_union_df[a]
@@ -743,7 +672,7 @@ def run_benchmarks(
             union_pf_counts[a] = int(len(pf_union))
         _plot_union_pareto_profiles(a, pf_union, os.path.join(out_dir, a))
 
-    # --- Save aggregated plots (deutsche Achsen; Bars absteigend sortiert) ---
+    # Aggregated plots (German axes; bars sorted by mean desc)
     _bar_chart(mean_cov,       "Abdeckung (Varianz)", os.path.join(out_dir, "coverage_bar.png"))
     _box_plot(coverage_lists,  "Abdeckung (Varianz)", os.path.join(out_dir, "coverage_box.png"))
 
@@ -761,7 +690,7 @@ def run_benchmarks(
     _bar_chart(mean_spacing,   "Abstand (Spacing)",   os.path.join(out_dir, "spacing_bar.png"))
     _box_plot(spacing_lists,   "Abstand (Spacing)",   os.path.join(out_dir, "spacing_box.png"))
 
-    # --- Pairwise epsilon indicator (normalized) ---
+    # --- HVI (directed hypervolume improvement) heatmap (ε heatmap removed) ---
     def _normalize_df(df_vals: pd.DataFrame, objectives: Dict[str, str], bounds: Dict[str, Tuple[float, float]]) -> pd.DataFrame:
         if df_vals is None or df_vals.empty:
             return pd.DataFrame(columns=OBJ_COLS)
@@ -781,28 +710,11 @@ def run_benchmarks(
         pf_a = extract_pareto_front(df_all, objectives, bounds=bounds)
         pf_by_algo_norm[a] = _normalize_df(pf_a, objectives, bounds) if bounds else pf_a
 
-    # Gemeinsame Zielspalten (für Epsilon/HVI-Konsistenz)
+    # Common objective columns
     keys_candidates = [set(df.columns) for df in pf_by_algo_norm.values() if not df.empty]
-    if keys_candidates:
-        keys_full = sorted(set.intersection(*keys_candidates))
-    else:
-        keys_full = ORDERED_OBJ_COLS
+    keys_full = sorted(set.intersection(*keys_candidates)) if keys_candidates else ORDERED_OBJ_COLS
     if not keys_full:
         keys_full = ORDERED_OBJ_COLS
-
-    # Epsilon
-    eps_mat = pd.DataFrame(index=algos_present, columns=algos_present, dtype=float)
-    for a in algos_present:
-        for b in algos_present:
-            if pf_by_algo_norm[a].empty or pf_by_algo_norm[b].empty:
-                eps = float("inf")
-            else:
-                obj_min_eps = {k: "min" for k in keys_full}
-                eps = epsilon_indicator(pf_by_algo_norm[a][keys_full], pf_by_algo_norm[b][keys_full],
-                                        obj_min_eps, bounds=None)
-            eps_mat.loc[a, b] = float(eps)
-    _heatmap(eps_mat, os.path.join(out_dir, "epsilon_heatmap.png"), cbar_label="ε", value_fmt="%.2f")
-    eps_mat.to_csv(os.path.join(out_dir, "epsilon_matrix.csv"), float_format="%.6f")
 
     # HVI
     obj_min_full = {k: "min" for k in keys_full}
@@ -839,7 +751,7 @@ def run_benchmarks(
             "Mean Coverage (Diversity Var)": mean_cov[a],
             "Std Coverage": std_cov[a],
             "Var Coverage": var_cov[a],
-            "Mean Total Time (s)": mean_time[a],   # Durchschnitt pro Run = Summe/10
+            "Mean Total Time (s)": mean_time[a],   # per-run average = sum/10
             "Std Total Time (s)": std_time[a],
             "Var Total Time (s)": var_time[a],
             "Ø Pareto-Loesungen/Seed": mean_pfcount[a],
@@ -856,11 +768,11 @@ def run_benchmarks(
     summary_df.to_csv(os.path.join(out_dir, "summary_metrics.csv"), index=False)
     print(f"[SAVE] {os.path.join(out_dir, 'summary_metrics.csv')}")
 
-    # --- Significance: Friedman tests über gemeinsame Seeds ---
-    _friedman_test(per_algo_seed_hv,      algos_present, "HV",       out_dir, higher_is_better=True)
-    _friedman_test(per_algo_seed_spacing, algos_present, "Spacing",  out_dir, higher_is_better=False)
-    _friedman_test(per_algo_seed_cov,     algos_present, "Coverage", out_dir, higher_is_better=True)
-    _friedman_test(per_algo_seed_time,    algos_present, "Zeit",     out_dir, higher_is_better=False)
+    # --- Significance: Friedman (average ranks only) over common seeds ---
+    _friedman_ranks_only(per_algo_seed_hv,      algos_present, "HV",       out_dir, higher_is_better=True)
+    _friedman_ranks_only(per_algo_seed_spacing, algos_present, "Spacing",  out_dir, higher_is_better=False)
+    _friedman_ranks_only(per_algo_seed_cov,     algos_present, "Coverage", out_dir, higher_is_better=True)
+    _friedman_ranks_only(per_algo_seed_time,    algos_present, "Zeit",     out_dir, higher_is_better=False)
 
 
 # ------------------------------- Entry point --------------------------------

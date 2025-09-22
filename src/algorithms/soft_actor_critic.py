@@ -1,4 +1,10 @@
 # -*- coding: utf-8 -*-
+"""Soft Actor-Critic (SAC) for vehicle design with NSGA-style reward.
+
+The simulator returns four objectives to minimize (consumption, ela3, ela4, ela5).
+Negative values are allowed; only non-finite outputs are discarded and the
+corresponding actions are cached to avoid re-evaluation. TensorFlow uses float64.
+"""
 from __future__ import annotations
 
 import time
@@ -15,32 +21,20 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 
 from src.utils.constraints import enforce_gear_descending
-from src.utils.objectives import nsga_rank_cd_reward  # Rank + CD~ reward (no reference point)
+from src.utils.objectives import nsga_rank_cd_reward
 
-# Use double precision throughout
 tf.keras.backend.set_floatx("float64")
 
 
 class SoftActorCritic:
-    """
-    Soft Actor-Critic (SAC) mit NSGA-kompatiblem Reward.
-
-    Validierungs-Regel (geändert):
-    - Negative Simulatorwerte (consumption, ela3, ela4, ela5) sind ERLAUBT.
-    - Verworfen wird NUR, wenn einer der Simulatorwerte nicht endlich ist (NaN/Inf):
-        * Punkt wird verworfen (kein Logging, kein Replay, kein Archiveintrag),
-        * Aktion wird gecached und zukünftig übersprungen (deterministisches Modell),
-        * Budget/Counter (eval_count) erhöht sich NICHT.
-    """
+    """Soft Actor-Critic with an NSGA-compatible reward (rank + normalized crowding)."""
 
     def __init__(self, env, search_space, **kwargs):
         self.env = env
         self.search_space = search_space
 
-        # Optional TensorBoard
         self.tb = kwargs.get("tb", None)
 
-        # Reproducibility
         self.seed = int(kwargs.get("seed", 0))
         np.random.seed(self.seed)
         random.seed(self.seed)
@@ -48,16 +42,13 @@ class SoftActorCritic:
 
         self.algo_name = "SAC"
 
-        # Action/Observation
         self.action_low = np.array([p["min"] for p in self.search_space], dtype=np.float64)
         self.action_high = np.array([p["max"] for p in self.search_space], dtype=np.float64)
         self.action_shape: Tuple[int, ...] = (len(self.search_space),)
         self.observation_shape: Tuple[int, ...] = (4,)
 
-        # Constraints
         self.use_constraints: bool = bool(kwargs.get("use_constraints", True))
 
-        # NSGA reward parameters (alle minimiert)
         self.objectives: Dict[str, str] = kwargs.get(
             "objectives",
             {"consumption": "min", "ela3": "min", "ela4": "min", "ela5": "min"},
@@ -68,7 +59,6 @@ class SoftActorCritic:
         self.w_c: float = 1.0 - self.w_r
         self.nsga_eps: float = float(kwargs.get("nsga_eps", 1e-12))
 
-        # SAC Hyperparameter
         self.gamma: float = float(kwargs.get("gamma", 0.99))
         self.tau: float = float(kwargs.get("tau", 0.005))
         self.batch_size: int = int(kwargs.get("batch_size", 64))
@@ -84,29 +74,24 @@ class SoftActorCritic:
         self.auto_alpha: bool = bool(kwargs.get("auto_alpha", True))
         alpha_init = float(kwargs.get("alpha", 0.2))
 
-        # Replay & scaling
         self.memory: deque = deque(maxlen=self.memory_capacity)
         self.action_bound = (self.action_high - self.action_low) / 2.0
         self.action_shift = (self.action_high + self.action_low) / 2.0
         self.log_std_min, self.log_std_max = -20.0, 2.0
 
-        # Netzwerke
         self.actor: Model = self._build_actor(actor_units)
         self.critic_1: Model = self._build_critic(critic_units)
         self.critic_2: Model = self._build_critic(critic_units)
         self.critic_target_1: Model = self._build_critic(critic_units)
         self.critic_target_2: Model = self._build_critic(critic_units)
 
-        # Optimizer
         self.actor_optimizer = Adam(learning_rate=lr_actor)
         self.critic_optimizer_1 = Adam(learning_rate=lr_critic)
         self.critic_optimizer_2 = Adam(learning_rate=lr_critic)
 
-        # Targets initialisieren
         self._update_target_weights(self.critic_1, self.critic_target_1, tau=1.0)
         self._update_target_weights(self.critic_2, self.critic_target_2, tau=1.0)
 
-        # Entropy-Temperatur
         if self.auto_alpha:
             self.target_entropy = -float(np.prod(self.action_shape))
             self.log_alpha = tf.Variable(0.0, dtype=tf.float64)
@@ -116,18 +101,14 @@ class SoftActorCritic:
             self.log_alpha = None
             self.alpha = tf.Variable(alpha_init, dtype=tf.float64)
 
-        # Bookkeeping
-        self.eval_count: int = 0                    # zählt GÜLTIGE Evaluations
+        self.eval_count: int = 0
         self.results_list: List[Dict[str, Any]] = []
         self._recent_actions: deque = deque(maxlen=1000)
 
-        # Archive (nur gültige Punkte)
         self.archive_all_df: pd.DataFrame = pd.DataFrame(columns=self.obj_keys)
 
-        # Cache: invalid actions
         self.invalid_actions: Set[Tuple[float, ...]] = set()
 
-        # Optional TB
         if self.tb:
             self.tb.text("SAC/Info", "SoftActorCritic initialized (NSGA rank+CD reward).", step=0)
             self.tb.scalar("SAC/NSGA/w_r", float(self.w_r), step=0)
@@ -139,6 +120,7 @@ class SoftActorCritic:
     # Network builders & utils
     # ---------------------------------------------------------------------
     def _build_actor(self, units: Tuple[int, ...]) -> Model:
+        """Gaussian policy network returning mean and log-std per action dimension."""
         s = Input(shape=self.observation_shape)
         x = Dense(units[0], activation="relu")(s)
         for u in units[1:]:
@@ -148,6 +130,7 @@ class SoftActorCritic:
         return Model(inputs=s, outputs=[mean, log_std])
 
     def _build_critic(self, units: Tuple[int, ...]) -> Model:
+        """State-action Q-network."""
         s_in = Input(shape=self.observation_shape)
         a_in = Input(shape=self.action_shape)
         x = Concatenate(axis=-1)([s_in, a_in])
@@ -158,6 +141,7 @@ class SoftActorCritic:
         return Model(inputs=[s_in, a_in], outputs=q)
 
     def _update_target_weights(self, model: Model, target_model: Model, tau: float) -> None:
+        """Polyak averaging: target ← tau * online + (1 - tau) * target."""
         w = model.get_weights()
         tw = target_model.get_weights()
         for i in range(len(tw)):
@@ -166,19 +150,19 @@ class SoftActorCritic:
 
     @staticmethod
     def _is_valid_sim(sim: Tuple[float, float, float, float]) -> bool:
-        """
-        Änderung: nur Endlichkeit prüfen, negative Werte sind erlaubt.
-        """
+        """Return True iff all values are finite; negatives are allowed."""
         arr = np.asarray(sim, dtype=np.float64)
         return np.isfinite(arr).all()
 
     @staticmethod
     def _action_key(x: np.ndarray, decimals: int = 6) -> Tuple[float, ...]:
+        """Stable key for caching actions with limited precision."""
         return tuple(np.round(np.asarray(x, dtype=np.float64), decimals=decimals).tolist())
 
     def _process_actions(
         self, mean: tf.Tensor, log_std: tf.Tensor, eps: float = 1e-6
     ) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+        """Sample Tanh-squashed actions, return env-scaled actions and log-probs."""
         log_std = tf.clip_by_value(log_std, self.log_std_min, self.log_std_max)
         std = tf.exp(log_std)
         raw = mean + tf.random.normal(shape=tf.shape(mean), dtype=tf.float64) * std
@@ -191,6 +175,7 @@ class SoftActorCritic:
         return actions, log_prob, a_tanh
 
     def _apply_constraints(self, x: np.ndarray) -> np.ndarray:
+        """Apply problem-specific constraints if enabled."""
         return enforce_gear_descending(x, self.search_space) if self.use_constraints else x
 
     def _log_record(
@@ -212,6 +197,7 @@ class SoftActorCritic:
         loss_critic2: Optional[float] = None,
         phase: str = "interaction",
     ) -> None:
+        """Append a single interaction/update record to the results buffer."""
         rec: Dict[str, Any] = {
             "algo": self.algo_name,
             "seed": self.seed,
@@ -219,18 +205,15 @@ class SoftActorCritic:
             "timestamp": time.time(),
             "wall_time_s": float(wall_time_s),
             "t_env_ms": float(t_env_ms),
-            # action (after constraints)
             "p1_final_drive_ratio": float(action_vec[0]),
             "p2_roll_radius": float(action_vec[1]),
             "p3_gear3_diff": float(action_vec[2]),
             "p4_gear4_diff": float(action_vec[3]),
             "p5_gear5": float(action_vec[4]),
-            # objectives
             "consumption": float(sim[0]),
             "ela3": float(sim[1]),
             "ela4": float(sim[2]),
             "ela5": float(sim[3]),
-            # reward & NSGA diagnostics
             "reward": float(reward),
             "rank": int(rank),
             "cd_raw": float(cd_raw),
@@ -255,6 +238,7 @@ class SoftActorCritic:
     # Acting, memory, learning
     # ---------------------------------------------------------------------
     def act(self, state: np.ndarray, use_random: bool = False) -> Tuple[np.ndarray, Optional[tf.Tensor]]:
+        """Return an action (random during warmup) and its log-prob (if policy-based)."""
         s = np.expand_dims(state, axis=0)
         if use_random:
             a = np.random.uniform(self.action_low, self.action_high, size=self.action_shape)
@@ -267,9 +251,11 @@ class SoftActorCritic:
 
     def remember(self, state: np.ndarray, action: np.ndarray, reward: float,
                  next_state: np.ndarray, done: bool) -> None:
+        """Store a transition in the replay buffer."""
         self.memory.append([state, action, reward, next_state, done])
 
     def replay(self) -> Optional[Dict[str, float]]:
+        """One SAC update step from a random minibatch; returns scalar metrics."""
         if len(self.memory) < self.batch_size:
             return None
 
@@ -284,7 +270,6 @@ class SoftActorCritic:
 
         update_t0 = time.perf_counter()
         with tf.GradientTape(persistent=True) as tape:
-            # Targets
             n_mean, n_log_std = self.actor(next_states)
             next_actions, n_logp, _ = self._process_actions(n_mean, n_log_std)
             q1_next = self.critic_target_1([next_states, next_actions])
@@ -293,13 +278,11 @@ class SoftActorCritic:
             target_v = q_next_min - self.alpha * n_logp
             target_q = rewards + self.gamma * (1.0 - dones) * target_v
 
-            # Critics
             q1 = self.critic_1([states, actions])
             q2 = self.critic_2([states, actions])
             critic_loss_1 = tf.reduce_mean(0.5 * tf.square(q1 - target_q))
             critic_loss_2 = tf.reduce_mean(0.5 * tf.square(q2 - target_q))
 
-            # Actor
             a_mean, a_log_std = self.actor(states)
             new_actions, logp, _ = self._process_actions(a_mean, a_log_std)
             q1_pi = self.critic_1([states, new_actions])
@@ -307,7 +290,6 @@ class SoftActorCritic:
             q_pi_min = tf.minimum(q1_pi, q2_pi)
             actor_loss = tf.reduce_mean(self.alpha * logp - q_pi_min)
 
-            # Alpha (optional)
             if self.auto_alpha:
                 alpha_loss = -tf.reduce_mean(self.log_alpha * tf.stop_gradient(logp + self.target_entropy))
 
@@ -350,16 +332,12 @@ class SoftActorCritic:
         return metrics
 
     def run(self, budget: int) -> None:
-        """
-        Läuft bis `budget` GÜLTIGE Umgebungs-Evaluations gesammelt wurden.
-        Ungültig = nur nicht-endliche Simulationsoutputs (NaN/Inf).
-        """
+        """Interact with the environment until `budget` valid evaluations are collected."""
         current_state = np.zeros(self.observation_shape, dtype=np.float64)
 
         while self.eval_count < budget:
             step_t0 = time.perf_counter()
 
-            # Aktion wählen (Policy oder Random), bekannte "invalid actions" vermeiden
             use_random = self.eval_count < self.initial_random_steps
             max_resamples = 20
             attempt = 0
@@ -373,27 +351,20 @@ class SoftActorCritic:
                     action = cand
                     break
                 attempt += 1
-                # Nach einigen Versuchen zusätzliche Zufallserkundung erzwingen
                 use_random = True
             if action is None:
-                # Fallback: uniforme Aktion im erlaubten Bereich
                 cand = np.random.uniform(self.action_low, self.action_high, size=self.action_shape)
                 action = self._apply_constraints(cand)
 
-            # Environment step timing
             t_env0 = time.perf_counter()
             sim_results = self.env.step(action)
             t_env_ms = (time.perf_counter() - t_env0) * 1000.0
 
-            # Validierung (nur Endlichkeit)
             if not self._is_valid_sim(sim_results):
-                # Aktion merken und verwerfen; KEIN eval_count++ !
                 self.invalid_actions.add(self._action_key(action))
-                # kleine Pause, um Busy-Wait zu vermeiden
                 time.sleep(0.001)
                 continue
 
-            # --- gültiger Punkt ---
             self.eval_count += 1
 
             point = {
@@ -403,7 +374,6 @@ class SoftActorCritic:
                 "ela5": float(sim_results[3]),
             }
 
-            # NSGA-Reward + Archive
             reward, rank, cd_raw, cd_tilde = nsga_rank_cd_reward(
                 self.archive_all_df, point, self.objectives,
                 w_r=self.w_r, w_c=self.w_c, eps=self.nsga_eps
@@ -413,16 +383,13 @@ class SoftActorCritic:
             next_state = np.array(sim_results[:4], dtype=np.float64)
             done = False
 
-            # Replay & Update
             self.remember(current_state, action, reward, next_state, done)
             train_metrics = self.replay()
 
-            # Target-Netze
             self._update_target_weights(self.critic_1, self.critic_target_1, self.tau)
             self._update_target_weights(self.critic_2, self.critic_target_2, self.tau)
             self._recent_actions.append(action)
 
-            # Optional TB (nur gültige Punkte)
             if self.tb:
                 step = self.eval_count
                 self.tb.scalar("SAC/Reward", float(reward), step=step)
@@ -442,7 +409,6 @@ class SoftActorCritic:
 
             wall_time_s = time.perf_counter() - step_t0
 
-            # Logging (nur gültige Punkte)
             self._log_record(
                 action_vec=action,
                 sim=sim_results,

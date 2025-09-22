@@ -1,21 +1,19 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 """
 Metrics and utilities for multi-objective benchmarking.
 
-Update (normalized HV):
-- Wenn `bounds` (Min/Max) übergeben werden, erfolgt die HV-Berechnung
-  im NORMALISIERTEN MIN-Raum:
-      z = (f_min - lo_min) / (hi_min - lo_min)
-  und der Referenzpunkt wird entsprechend normalisiert. Wenn die Max-Werte
-  zugleich den Referenzpunkt bilden, ist r_norm = 1 in jeder Dimension.
-- Punkte außerhalb [lo, hi] (Originalraum) werden weiterhin DROPPED.
-- Alle sonstigen Metriken nutzen, wo sinnvoll, ebenfalls den normalisierten Raum.
+Normalized hypervolume:
+- If `bounds` (min/max) are provided, HV is computed in normalized
+  minimization space: z = (f_min - lo_min) / (hi_min - lo_min).
+  The reference point is normalized with the same bounds. If the bounds'
+  upper limits coincide with the reference point, r_norm = 1 in each dimension.
+- Points outside [lo, hi] in the original space are dropped.
+- Other metrics also use the normalized space when `bounds` are given.
 
-Hinweise:
-- `objectives = {"f": "min"|"max", ...}` definiert die Richtung.
-- Für "max"-Ziele werden Werte vor der Normalisierung zuerst in den
-  Minimierungsraum gespiegelt (f_min = -f).
+Notes:
+- `objectives = {"f": "min"|"max", ...}` defines the orientation.
+- For "max" objectives, values are mirrored to minimization space before
+  normalization (f_min = -f).
 """
 
 import math
@@ -34,7 +32,7 @@ def _apply_objective_bounds_mask(
     cols: List[str],
     bounds: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> np.ndarray:
-    """Boolean-Maske für Punkte innerhalb der (Originalraum-)Bounds."""
+    """Return a boolean mask for points inside `[lo, hi]` in the original space."""
     if not bounds:
         return np.ones(arr.shape[0], dtype=bool)
 
@@ -54,11 +52,7 @@ def _clean_objective_rows(
     objectives: Dict[str, str],
     bounds: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> pd.DataFrame:
-    """
-    Entfernt ungültige Zeilen im ORIGINALRAUM:
-    - drop NaN/inf, drop negative Werte,
-    - drop Zeilen außerhalb [lo, hi], wenn `bounds` gesetzt.
-    """
+    """Drop invalid rows in the original space: NaN/inf, negative, and out-of-bounds."""
     if df is None or df.empty:
         return df
 
@@ -77,7 +71,7 @@ def _clean_objective_rows(
 
 
 def _to_min_space(df: pd.DataFrame, objectives: Dict[str, str]) -> pd.DataFrame:
-    """Mappt alle Ziele auf Minimierung (max -> -1 * Wert)."""
+    """Flip sign for 'max' objectives so that all objectives are minimized."""
     out = df.copy()
     for c, s in objectives.items():
         if s.lower() == "max":
@@ -89,7 +83,7 @@ def _hv_ref_point_to_min_space(
     ref_point: Dict[str, float],
     objectives: Dict[str, str]
 ) -> np.ndarray:
-    """Referenzpunkt in den Minimierungsraum; Reihenfolge = objectives.keys()."""
+    """Map the reference point into minimization space in `objectives` key order."""
     r = []
     for c, s in objectives.items():
         v = float(ref_point[c])
@@ -102,10 +96,7 @@ def _bounds_to_min_space(
     objectives: Dict[str, str],
     cols: Optional[List[str]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Transformiert (lo, hi) aus dem Originalraum in den MIN-Raum.
-    Für max-Ziele gilt: lo_min = -hi, hi_min = -lo.
-    """
+    """Transform (lo, hi) bounds into minimization space (handle 'max' by mirroring)."""
     if cols is None:
         cols = list(objectives.keys())
     lo_min, hi_min = [], []
@@ -119,7 +110,7 @@ def _bounds_to_min_space(
         if s == "min":
             lo_min.append(float(-np.inf) if lo is None else float(lo))
             hi_min.append(float(np.inf)  if hi is None else float(hi))
-        else:  # max -> in min-space spiegeln
+        else:
             lo_m = None if hi is None else -float(hi)
             hi_m = None if lo is None else -float(lo)
             lo_min.append(float(-np.inf) if lo_m is None else lo_m)
@@ -131,7 +122,7 @@ def _filter_points_dominated_by_ref(
     F_min: np.ndarray,
     r_min: np.ndarray
 ) -> Tuple[np.ndarray, bool]:
-    """Behält nur Punkte <= r im MIN-Raum."""
+    """Keep only points `<= r` in minimization space."""
     mask = np.all(F_min <= r_min[None, :], axis=1)
     return F_min[mask], bool(np.any(~mask))
 
@@ -145,7 +136,7 @@ def extract_pareto_front(
     objectives: Dict[str, str],
     bounds: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> pd.DataFrame:
-    """Nicht-dominierte Punkte w.r.t. `objectives`; out-of-bounds werden gedroppt."""
+    """Return the non-dominated set w.r.t. `objectives`; drops out-of-bounds."""
     if df is None or df.empty:
         return df
 
@@ -185,10 +176,7 @@ def _normalize_min_space_points(
     bounds: Dict[str, Tuple[float, float]],
     cols: List[str],
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Normalisiert MIN-Raum-Punkte gemäß Bounds.
-    Rückgabe: Z_norm, lo_min, hi_min
-    """
+    """Normalize minimization-space points using `bounds`. Returns (Z, lo_min, hi_min)."""
     lo_min, hi_min = _bounds_to_min_space(bounds, objectives, cols)
     denom = np.maximum(hi_min - lo_min, 1e-12)
     Z = (F_min - lo_min[None, :]) / denom[None, :]
@@ -201,11 +189,7 @@ def calculate_hypervolume_exact(
     objectives: Dict[str, str],
     bounds: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> float:
-    """
-    Exaktes Hypervolumen. Wenn `bounds` gesetzt:
-    - Normalisierung im MIN-Raum mit diesen Bounds,
-    - Referenzpunkt wird mit denselben Bounds normalisiert.
-    """
+    """Exact HV via pygmo; if `bounds` provided, compute in normalized min-space."""
     if pareto_df is None or pareto_df.empty:
         return 0.0
 
@@ -216,7 +200,7 @@ def calculate_hypervolume_exact(
     cols = list(objectives.keys())
 
     try:
-        import pygmo as pg  # optional exact HV
+        import pygmo as pg
         F_min = _to_min_space(df_clean[cols], objectives).to_numpy(dtype=float)
 
         if bounds:
@@ -230,7 +214,6 @@ def calculate_hypervolume_exact(
             hv = pg.hypervolume(F_use)
             return float(hv.compute(r))
 
-        # Ohne Bounds: Original-MIN-Raum gegen ref_point im MIN-Raum
         r = _hv_ref_point_to_min_space(ref_point, objectives)
         F_use, _ = _filter_points_dominated_by_ref(F_min, r)
         if F_use.size == 0:
@@ -249,9 +232,7 @@ def calculate_hypervolume_approx(
     n_samples: int = 200_000,
     seed: Optional[int] = None,
 ) -> float:
-    """
-    Monte-Carlo-HV im (normalisierten) MIN-Raum.
-    """
+    """Monte-Carlo HV in (normalized) minimization space."""
     if pareto_df is None or pareto_df.empty:
         return 0.0
 
@@ -318,11 +299,7 @@ def _normalized_points_for_metrics(
     objectives: Dict[str, str],
     bounds: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> np.ndarray:
-    """
-    Liefert Punkte im MIN-Raum, normalisiert:
-        z = (f_min - lo_min) / (hi_min - lo_min)
-    Vorher werden out-of-bounds gedroppt.
-    """
+    """Return points in normalized minimization space; drops out-of-bounds first."""
     df = _clean_objective_rows(df, objectives, bounds=bounds)
     if df.empty:
         return np.empty((0, len(objectives)), dtype=float)
@@ -335,7 +312,6 @@ def _normalized_points_for_metrics(
         denom = np.maximum(hi_min - lo_min, 1e-12)
         return (X_min - lo_min[None, :]) / denom[None, :]
 
-    # Fallback: min-max über df im MIN-Raum
     mn = X_min.min(axis=0)
     mx = X_min.max(axis=0)
     denom = np.maximum(mx - mn, 1e-12)
@@ -353,10 +329,7 @@ def metric_hypervolume(
     hv_mode: str = "approx",
     bounds: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> float:
-    """
-    Einheits-Wrapper: Mit `bounds` wird HV im NORMALISIERTEN MIN-Raum berechnet.
-    Ohne `bounds` im (nicht-normalisierten) MIN-Raum.
-    """
+    """Wrapper for HV: normalized min-space if `bounds` given, else raw min-space."""
     mode = (hv_mode or "approx").lower()
     if mode == "exact":
         return calculate_hypervolume_exact(pareto_df, ref_point, objectives, bounds=bounds)
@@ -368,7 +341,7 @@ def metric_spacing(
     objectives: Dict[str, str],
     bounds: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> float:
-    """Schott’s spacing im normalisierten MIN-Raum."""
+    """Schott’s spacing in normalized minimization space."""
     if pareto_df is None or len(pareto_df) < 2:
         return 0.0
     P = _normalized_points_for_metrics(pareto_df, objectives, bounds=bounds)
@@ -392,7 +365,7 @@ def metric_delta_spread(
     objectives: Dict[str, str],
     bounds: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> float:
-    """CV der NN-Distanzen im normalisierten MIN-Raum; kleiner ist besser."""
+    """Coefficient of variation of nearest-neighbor distances (smaller is better)."""
     if pareto_df is None or len(pareto_df) < 2:
         return 0.0
     P = _normalized_points_for_metrics(pareto_df, objectives, bounds=bounds)
@@ -416,7 +389,7 @@ def metric_diversity_measure(
     objectives: Dict[str, str],
     bounds: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> float:
-    """Durchschnittliche Varianz je Dimension im normalisierten MIN-Raum."""
+    """Mean per-dimension variance in normalized minimization space."""
     if pareto_df is None or pareto_df.empty:
         return 0.0
     P = _normalized_points_for_metrics(pareto_df, objectives, bounds=bounds)
@@ -430,7 +403,7 @@ def metric_maximum_spread(
     objectives: Dict[str, str],
     bounds: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> float:
-    """Maximale paarweise L2-Distanz im normalisierten MIN-Raum."""
+    """Maximum pairwise L2 distance in normalized minimization space."""
     if pareto_df is None or len(pareto_df) < 2:
         return 0.0
     P = _normalized_points_for_metrics(pareto_df, objectives, bounds=bounds)
@@ -456,10 +429,7 @@ def metric_radial_coverage(
     bounds: Optional[Dict[str, Tuple[float, float]]] = None,
     n_bins: int = 10,
 ) -> Tuple[float, Dict[str, np.ndarray]]:
-    """
-    Winkelabdeckung (Projektion auf die ersten zwei Ziele) nach Normalisierung,
-    wenn `bounds` gesetzt sind; sonst im MIN-Raum ohne Normalisierung.
-    """
+    """Angular coverage (projection on first two objectives) after normalization if available."""
     edges = np.linspace(-math.pi, math.pi, n_bins + 1)
 
     if pareto_df is None or pareto_df.empty:
@@ -505,9 +475,7 @@ def metric_success_counting(
     target_ranges: Dict[str, Tuple[float, float]],
     require_all: bool = True,
 ) -> Tuple[int, float]:
-    """
-    Box-Membership im Originalraum (unverändert).
-    """
+    """Count points inside a target box in the original space."""
     if df is None or df.empty or not target_ranges:
         return 0, 0.0
 
@@ -533,7 +501,7 @@ def metric_success_counting(
 # ============================================================================
 
 def _infer_eval_order(df: pd.DataFrame) -> np.ndarray:
-    """Heuristik zur Evaluationsreihenfolge."""
+    """Heuristic for evaluation ordering (unused by the public API)."""
     candidates = ["evaluation", "eval", "step", "iteration", "iter", "t", "budget", "timestamp"]
     for c in candidates:
         if c in df.columns:
@@ -541,7 +509,6 @@ def _infer_eval_order(df: pd.DataFrame) -> np.ndarray:
     return np.arange(len(df))
 
 
-# --- PATCH: hv_curve_over_evals (GA/AL-kompatibel, robust gg. 'phase' und Indexe) ---
 def hv_curve_over_evals(
     df: pd.DataFrame,
     objectives: Dict[str, str],
@@ -551,23 +518,22 @@ def hv_curve_over_evals(
     bounds: Optional[Dict[str, Tuple[float, float]]] = None,
     exclude_phases: Tuple[str, ...] = ("update",),
 ) -> pd.Series:
-    """
-    HV(t) über **gültige** Evaluations, robust gg. Duplikate pro 'evaluation'.
-    Index = 1..N_valid (nicht die rohen Evaluations-IDs).
+    """HV(t) over valid evaluations, robust to duplicates per `evaluation` id.
+
+    Index is 1..N_valid (not raw evaluation ids). Phases listed in
+    `exclude_phases` (e.g., 'update') are filtered out if present.
     """
     if df is None or df.empty:
         return pd.Series(dtype=float, name="HV")
 
     cols = list(objectives.keys())
 
-    # 1) optionale Phasen ausschließen
     if "phase" in df.columns and exclude_phases:
         df = df[~df["phase"].astype(str).str.lower().isin([p.lower() for p in exclude_phases])].copy()
 
     if not set(cols).issubset(df.columns):
         return pd.Series(dtype=float, name="HV")
 
-    # 2) Gültigkeitsmaske im Originalraum
     X = df[cols].to_numpy(dtype=float, copy=True)
     finite_mask  = np.isfinite(X).all(axis=1)
     nonneg_mask  = (X >= 0.0).all(axis=1)
@@ -576,7 +542,6 @@ def hv_curve_over_evals(
     if not np.any(keep):
         return pd.Series(dtype=float, name="HV")
 
-    # 3) Dedup: pro 'evaluation' nur die letzte gültige Zeile
     if "evaluation" in df.columns:
         work = df.loc[keep, ["evaluation"] + cols].copy()
         work["evaluation"] = pd.to_numeric(work["evaluation"], errors="coerce")
@@ -603,8 +568,6 @@ def hv_curve_over_evals(
     return pd.Series(hv_vals, index=steps, name="HV")
 
 
-
-# --- PATCH: evals_to_reach_fraction (nutzt die neue Kurve) ---
 def evals_to_reach_fraction(
     df: pd.DataFrame,
     objectives: Dict[str, str],
@@ -615,9 +578,7 @@ def evals_to_reach_fraction(
     bounds: Optional[Dict[str, Tuple[float, float]]] = None,
     exclude_phases: Tuple[str, ...] = ("update",),
 ) -> int:
-    """
-    Kleinste Anzahl **gültiger** Evaluations, ab der HV >= frac * final_HV.
-    """
+    """Smallest number of valid evaluations where HV ≥ `frac` × final HV."""
     curve = hv_curve_over_evals(
         df, objectives, ref_point, hv_mode=hv_mode, stride=stride, bounds=bounds,
         exclude_phases=exclude_phases
@@ -630,7 +591,6 @@ def evals_to_reach_fraction(
     return int(hit.index[0]) if not hit.empty else int(len(curve))
 
 
-
 # ============================================================================
 # Binary epsilon indicator (multiplicative) – optional, bounds-aware
 # ============================================================================
@@ -641,9 +601,7 @@ def epsilon_indicator(
     objectives: Dict[str, str],
     bounds: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> float:
-    """
-    Multiplikativer Epsilon-Indikator im ORIGINALRAUM mit Bounds-Filterung.
-    """
+    """Multiplicative epsilon indicator in the original space with bounds filtering."""
     cols = list(objectives.keys())
     A_ = _clean_objective_rows(A[cols], objectives, bounds=bounds)
     B_ = _clean_objective_rows(B[cols], objectives, bounds=bounds)
@@ -675,7 +633,7 @@ def valid_rate(
     target_box: Dict[str, Tuple[float, float]],
     keys: Optional[List[str]] = None
 ) -> float:
-    """Anteil der Punkte innerhalb einer Box (lo, hi)."""
+    """Fraction of points inside a (lo, hi) box in the original space."""
     pts = list(points)
     if len(pts) == 0:
         return 0.0

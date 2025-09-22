@@ -1,4 +1,10 @@
-# -*- coding: utf-8 -*-
+"""Pool-based Active Learning with NN committee for vehicle design.
+
+This module builds a discrete candidate pool from step widths, trains a small
+committee of MLP surrogate models, and iteratively queries the simulator.
+Negative objective values are allowed; only non-finite outputs are discarded
+and cached to avoid re-evaluation.
+"""
 from __future__ import annotations
 import time
 from typing import Optional, Dict, Any, List, Tuple, Set
@@ -11,24 +17,11 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping
 
 from src.utils.constraints import enforce_gear_descending
-from src.utils.objectives import nsga_rank_cd_reward  # Rank + normalized crowding (no ref point)
+from src.utils.objectives import nsga_rank_cd_reward
 
 
 class ActiveLearningAlgorithm:
-    """
-    Pool-based Active Learning with a small committee of NN surrogate models.
-
-    Änderungen (Validierung):
-    - Negative Simulatorwerte sind ERLAUBT.
-    - Verworfen werden NUR nicht-endliche Werte (NaN/Inf).
-      → keine Logs, keine Labels, kein Archiveintrag, kein eval_count++
-      → Aktion wird gecached (deterministisches Modell) und künftig übersprungen.
-
-    Pool:
-    - Kandidatenpool = kartesisches GRID aus Bounds (common_config.search_space)
-      und per Config vorgegebenen Schrittweiten `step_widths[name]`.
-    - `pool_size` wird automatisch bestimmt; Tuning der Schrittweiten ist ausgeschlossen.
-    """
+    """Pool-based Active Learning with a small committee of MLP surrogates."""
 
     def __init__(self, env, search_space, **kwargs):
         self.env = env
@@ -63,16 +56,16 @@ class ActiveLearningAlgorithm:
         # Constraints
         self.use_constraints: bool = bool(kwargs.get("use_constraints", True))
 
-        # Schrittweiten (erforderlich)
+        # Step widths (required)
         self.step_widths: Dict[str, float] = dict(kwargs.get("step_widths", {}))
         if not self.step_widths:
-            raise ValueError("ActiveLearningAlgorithm: 'step_widths' müssen in der AL-Config gesetzt sein.")
+            raise ValueError("ActiveLearningAlgorithm: 'step_widths' must be provided in the AL config.")
         for p in self.search_space:
             name = p["name"]
             if name not in self.step_widths or float(self.step_widths[name]) <= 0.0:
-                raise ValueError(f"ActiveLearningAlgorithm: fehlende/ungültige step_width für '{name}'.")
+                raise ValueError(f"ActiveLearningAlgorithm: missing/invalid step_width for '{name}'.")
 
-        # NSGA reward parameters (alle Ziele minimiert)
+        # NSGA-style reward (all objectives minimized)
         self.objectives: Dict[str, str] = kwargs.get(
             "objectives",
             {"consumption": "min", "ela3": "min", "ela4": "min", "ela5": "min"},
@@ -84,11 +77,11 @@ class ActiveLearningAlgorithm:
         self.w_c: float = 1.0 - self.w_r
         self.nsga_eps: float = float(kwargs.get("nsga_eps", 1e-12))
 
-        # Kandidatenpool aus Schrittweiten
+        # Candidate pool from step widths
         self.X_pool: np.ndarray = self._build_grid_from_steps(self.search_space, self.step_widths)
         self.pool_size: int = int(self.X_pool.shape[0])
 
-        # Labels & Masken
+        # Labels & masks
         self.y_pool: np.ndarray = np.full(self.pool_size, np.nan, dtype=float)  # NaN = unlabeled
         self.invalid_actions: Set[Tuple[float, ...]] = set()
         self.invalid_mask: np.ndarray = np.zeros(self.pool_size, dtype=bool)
@@ -97,10 +90,10 @@ class ActiveLearningAlgorithm:
         self.models: List[Sequential] = [self._build_nn_model() for _ in range(self.num_models)]
 
         # Book-keeping
-        self.eval_count: int = 0                   # zählt GÜLTIGE Evaluations
+        self.eval_count: int = 0  # counts valid evaluations only
         self.best_reward_so_far: float = float("-inf")
 
-        # Archiv gültiger Zielvektoren (für NSGA-Reward)
+        # Archive of valid objective vectors (for NSGA reward)
         self.archive_all_df: pd.DataFrame = pd.DataFrame(columns=self.obj_keys)
 
     # ---------------------------------------------------------------------
@@ -108,16 +101,17 @@ class ActiveLearningAlgorithm:
     # ---------------------------------------------------------------------
     @staticmethod
     def _action_key(x_env: np.ndarray, decimals: int = 6) -> Tuple[float, ...]:
+        """Stable key for caching actions with limited precision."""
         return tuple(np.round(np.asarray(x_env, dtype=np.float64), decimals=decimals).tolist())
 
     @staticmethod
     def _is_valid_sim(sim: Tuple[float, float, float, float]) -> bool:
-        """Erlaubt negative Zielwerte; verwirft nur NaN/Inf."""
+        """Return True iff all values are finite; negatives are allowed."""
         arr = np.asarray(sim, dtype=np.float64)
         return np.isfinite(arr).all()
 
     def _grid_values(self, lo: float, hi: float, step: float) -> np.ndarray:
-        """Inklusive Gitterwerte [lo, hi] mit Schrittweite `step` (robust gegen Rundung)."""
+        """Inclusive grid [lo, hi] with step `step`, robust to rounding."""
         n = int(np.floor((hi - lo) / step + 1e-12)) + 1
         vals = lo + np.arange(n, dtype=np.float64) * step
         vals = np.round(vals, 6)
@@ -125,7 +119,7 @@ class ActiveLearningAlgorithm:
         return vals
 
     def _build_grid_from_steps(self, search_space: List[Dict[str, Any]], step_widths: Dict[str, float]) -> np.ndarray:
-        """Kartesisches Produkt aus Gitterwerten je Dimension; Constraints anwenden; Duplikate entfernen."""
+        """Cartesian product of per-dimension grids; apply constraints; drop duplicates."""
         axes: List[np.ndarray] = []
         names: List[str] = []
         for p in search_space:
@@ -135,11 +129,9 @@ class ActiveLearningAlgorithm:
             axes.append(self._grid_values(lo, hi, step))
             names.append(name)
 
-        # Kartesisches Produkt
         mesh = np.meshgrid(*axes, indexing="ij")
-        grid = np.stack([m.reshape(-1) for m in mesh], axis=1)  # [N, D]
+        grid = np.stack([m.reshape(-1) for m in mesh], axis=1)
 
-        # Constraints anwenden + Duplikate entfernen (deterministisch runden)
         uniq: List[np.ndarray] = []
         seen: Set[Tuple[float, ...]] = set()
         for x in grid:
@@ -155,7 +147,7 @@ class ActiveLearningAlgorithm:
         return X
 
     def _build_nn_model(self) -> Sequential:
-        """MLP-Regression mit Input-Normalisierung, adaptiert auf X_pool."""
+        """Build a simple MLP regressor with input normalization."""
         normalizer = Normalization(axis=-1)
         normalizer.adapt(self.X_pool)
 
@@ -169,7 +161,7 @@ class ActiveLearningAlgorithm:
         return model
 
     def _fit_surrogates(self, X_train: np.ndarray, y_train: np.ndarray) -> None:
-        """Fits each surrogate model on the currently labeled set."""
+        """Fit each surrogate on the currently labeled set."""
         for m in self.models:
             m.fit(
                 X_train,
@@ -181,7 +173,7 @@ class ActiveLearningAlgorithm:
             )
 
     def _predict_committee(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Returns mean/std across committee predictions."""
+        """Return mean and std across committee predictions."""
         preds = np.array([m.predict(X, verbose=0).flatten() for m in self.models])
         mean = np.mean(preds, axis=0)
         std = np.std(preds, axis=0) if preds.shape[0] > 1 else np.zeros_like(mean)
@@ -190,7 +182,7 @@ class ActiveLearningAlgorithm:
     def _select_query_indices(
         self, unlabeled_idx: np.ndarray, y_mean: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Teilt Batch in exploit (Top-Reward) und explore (random)."""
+        """Split a batch into exploit (top predicted reward) and explore (random)."""
         n_total_possible = len(unlabeled_idx)
         n_exploit = int(round(self.batch_size * self.exploit_fraction))
         n_exploit = max(0, min(n_exploit, min(self.batch_size, n_total_possible)))
@@ -237,35 +229,30 @@ class ActiveLearningAlgorithm:
         y_pred: Optional[float],
         y_pred_std: Optional[float],
     ) -> None:
+        """Append a single record to the results buffer."""
         rec: Dict[str, Any] = {
             "algo": self.algo_name,
             "seed": self.seed,
             "evaluation": int(self.eval_count),
             "timestamp": time.time(),
-            # timing
             "t_env_ms": float(t_env_ms),
             "wall_time_s": float(wall_time_s),
-            # action (after constraints)
             "p1_final_drive_ratio": float(x[0]),
             "p2_roll_radius": float(x[1]),
             "p3_gear3_diff": float(x[2]),
             "p4_gear4_diff": float(x[3]),
             "p5_gear5": float(x[4]),
-            # objectives
             "consumption": float(sim[0]),
             "ela3": float(sim[1]),
             "ela4": float(sim[2]),
             "ela5": float(sim[3]),
-            # reward diagnostics
             "reward": float(reward),
             "rank": int(rank),
             "cd_raw": float(cd_raw),
             "cd_tilde": float(cd_tilde),
-            # AL context
             "phase": phase,
             "cycle": int(cycle),
             "select_mode": str(select_mode),
-            # surrogate predictions at query time
             "y_pred": None if y_pred is None else float(y_pred),
             "y_pred_std": None if y_pred_std is None else float(y_pred_std),
         }
@@ -275,13 +262,9 @@ class ActiveLearningAlgorithm:
     # Main loop
     # ---------------------------------------------------------------------
     def run(self, budget: int) -> None:
-        """
-        Läuft, bis `budget` GÜLTIGE Evaluierungen erreicht sind.
-        Ungültig = nur nicht-endliche Simulationsoutputs (NaN/Inf).
-        """
-        # ------------------ Initial labeling ------------------
+        """Run until `budget` valid evaluations are reached (non-finite outputs are discarded)."""
+        # Initial labeling
         init_targets = min(self.initial_label_count, self.pool_size)
-        # Nur Kandidaten, die (noch) nicht invalid markiert sind
         candidates = np.where(~self.invalid_mask)[0]
         init_order = self.random_state.permutation(candidates)
         init_added = 0
@@ -296,7 +279,6 @@ class ActiveLearningAlgorithm:
             xx = self.X_pool[i]
             key = self._action_key(xx)
 
-            # Bekannter Invalid?
             if key in self.invalid_actions:
                 self.invalid_mask[i] = True
                 continue
@@ -306,12 +288,10 @@ class ActiveLearningAlgorithm:
             t_env_ms = (time.perf_counter() - t_env0) * 1000.0
 
             if not self._is_valid_sim(sim):
-                # Nur NaN/Inf verwerfen
                 self.invalid_actions.add(key)
                 self.invalid_mask[i] = True
                 continue
 
-            # --- gültig ---
             y_point = {"consumption": float(sim[0]), "ela3": float(sim[1]),
                        "ela4": float(sim[2]), "ela5": float(sim[3])}
 
@@ -336,7 +316,7 @@ class ActiveLearningAlgorithm:
                 y_pred=None, y_pred_std=None
             )
 
-        # ------------------ Active Learning cycles ------------------
+        # Active Learning cycles
         for cycle in range(1, self.num_cycles + 1):
             if self.eval_count >= budget:
                 break
@@ -380,12 +360,10 @@ class ActiveLearningAlgorithm:
                 t_env_ms = (time.perf_counter() - t_env0) * 1000.0
 
                 if not self._is_valid_sim(sim):
-                    # Nur NaN/Inf verwerfen
                     self.invalid_actions.add(key)
                     self.invalid_mask[i] = True
                     continue
 
-                # --- gültig ---
                 y_point = {"consumption": float(sim[0]), "ela3": float(sim[1]),
                            "ela4": float(sim[2]), "ela5": float(sim[3])}
 
@@ -402,7 +380,6 @@ class ActiveLearningAlgorithm:
 
                 wall_time_s = time.perf_counter() - step_t0
 
-                # Vorhersagen-Position
                 pos = np.where(unlabeled_idx == i)[0]
                 y_hat = float(y_mean[pos[0]]) if pos.size > 0 else None
                 y_hat_std = float(y_std[pos[0]]) if pos.size > 0 else None

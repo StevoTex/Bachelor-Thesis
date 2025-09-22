@@ -126,10 +126,107 @@ def main(algo_list: Optional[List[str]] = None) -> None:
     """
     Run a batch of experiments for each algorithm and write per-run and combined CSVs.
 
-    - Algorithms default to ["AL", "GA", "SAC", "A3C"] unless overridden by `common["algorithms"]`
-      or by passing `algo_list`.
-    - Seeds are taken from `common["seeds"]` if present. Otherwise, derive from
-      `common["seed"]` and `common["num_runs"]` (defaults: 42 and 10).
+    PARAMETERS
+    ----------
+    algo_list : Optional[List[str]]
+        Which algorithms to run in this invocation. Tags are case-insensitive and
+        normalized to the following canonical keys:
+          - "AL"    (aliases: "ACTIVE_LEARNING")
+          - "GA"    (aliases: "NSGA2", "NSGA-II")
+          - "SAC"
+          - "A3C"
+        If `None`, the runner uses (in order of precedence):
+          1) `algorithms` from configs/common_config.json (if present), or
+          2) the default ["AL", "GA", "SAC", "A3C"].
+
+    CONFIGURATION (configs/common_config.json)
+    -----------------------------------------
+    The runner expects a JSON file with (at least) the following keys. All keys are optional
+    unless marked as *required*. Sensible defaults are applied when omitted.
+
+    Required for a meaningful run:
+      - "search_space": List[Dict]          *required*
+          Parameter dictionaries understood by the algorithms (min/max/name etc.).
+      - "evaluation_budget": int            *required*
+          Number of valid environment evaluations per run.
+
+    Common/optional settings:
+      - "experiment_name": str              (default: "default_experiment")
+      - "output_dir": str                   (default: "results")
+      - "executable_name": str              (default: "ConsumptionCar.exe")
+      - "use_constraints": bool             (default: true)
+      - "objectives": Dict[str,"min"|"max"] (default: {"consumption":"min","ela3":"min","ela4":"min","ela5":"min"})
+      - "algorithms": List[str]             (optional; overrides default set when `algo_list` is None)
+      - Seeding (choose one of):
+          * "seeds": List[int]              (exact seeds to run)
+          * or "seed": int + "num_runs": int   (default: 42 + 10) → seeds = seed + [0..num_runs-1]
+
+    IMPORTANT (intentionally ignored by the runner — used only by analysis scripts):
+      - "reference_point"
+      - "hv_mode"
+      - Any RL reward shaping for analysis
+      These are *not* passed into algorithms and are not written to per-row logs.
+
+    PER-ALGORITHM CONFIGS (configs/algorithms/*_config.json)
+    --------------------------------------------------------
+    Optional JSONs to set constructor kwargs for each algorithm. The runner will search:
+      - AL :  activelearning_config.json  or  al_config.json
+      - GA :  nsga2_config.json           or  ga_config.json
+      - SAC:  sac_config.json
+      - A3C:  a3c_config.json
+    Expected structure:
+      {
+        "algorithm_params": {
+          "...": <value>,           # forwarded as **kwargs to the algorithm’s constructor
+          # Common pass-through added by this runner:
+          #   "use_constraints": bool
+          #   "seed": int
+          # Unknown keys are safely ignored by the algorithm implementations.
+        }
+      }
+
+    OUTPUTS
+    -------
+    For each algorithm and seed, a per-run CSV:
+      <output_dir>/<experiment_name>/<ALGO>/<ALGO>_seed<seed>_run<run_idx>_<YYYYmmdd-HHMMSS>.csv
+
+    Each CSV contains:
+      - Interaction-level logs produced by the respective algorithm (e.g., actions, objectives, reward, diagnostics).
+      - Run-level metadata columns (constant per file):
+          run_id (uuid4), run_index (1..N), experiment, algo, seed, budget,
+          executable_name, start_ts (unix), end_ts (unix), wall_time_s (seconds).
+
+    Additionally, a combined CSV per algorithm:
+      <output_dir>/<experiment_name>/<ALGO>/<ALGO>_all_runs.csv
+
+    USAGE
+    -----
+    CLI:
+      $ python run_experiment.py
+        → Uses algorithms from common_config.json (or the default set) and the seeding scheme as configured.
+
+    Programmatic:
+      >>> from run_experiment import main
+      >>> main()                          # use config/default algorithms
+      >>> main(["SAC", "GA"])             # run only SAC and NSGA-II
+      >>> main(["al","a3c"])              # tags are case-insensitive; aliases allowed
+
+    NOTES & BEHAVIOR
+    ----------------
+    - One environment instance (CarEnv) is created per run.
+    - If an algorithm raises an exception, the stack trace is printed and the runner proceeds
+      with the next run/seed (the failed run may still create an empty/partial CSV).
+    - `wall_time_s` is measured as end-to-end wall-clock for the run (no filtering).
+    - The runner does not accept CLI flags; configure via JSON or the `algo_list` parameter.
+    - No TensorBoard is used; all outputs are CSV.
+
+    RETURNS
+    -------
+    None. Results are written to disk.
+
+    ERRORS
+    ------
+    - ValueError if `algo_list` contains unknown tags (see accepted tags above).
     """
     # ---- Load common config ----
     common_path = "configs/common_config.json"

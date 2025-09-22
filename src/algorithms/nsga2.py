@@ -1,4 +1,9 @@
-# -*- coding: utf-8 -*-
+"""NSGA-II for vehicle design (delta re-parametrization).
+
+Evaluates candidates via an external simulator. All objectives are minimized.
+Negative objective values are allowed; only non-finite results are discarded.
+Invalid actions are cached to avoid re-use. Rank and crowding distance are logged.
+"""
 from __future__ import annotations
 
 import time
@@ -6,70 +11,68 @@ from typing import List, Dict, Any, Tuple, Set
 import numpy as np
 
 from src.utils.constraints import enforce_gear_descending
-from src.utils.objectives import rl_reward, is_terminal  # Target-Box / einheitliche Reward-Logik
-
-# Relative imports aus deiner GA-Toolbox
+from src.utils.objectives import rl_reward, is_terminal
 from ..toolbox_genetic_algorithms.evolution import EvolutionStrategy, Allele, Individual, Population
 
 
-# ---------------------------
-# Allele/Individual Blueprint (Δ-Re-Parametrisierung)
-# ---------------------------
-
 class FinalDrive(Allele):
+    """Allele for final-drive ratio (min/max)."""
     _min = 3.0
     _max = 5.5
 
 
 class RollRadius(Allele):
+    """Allele for roll radius (min/max)."""
     _min = 0.2
     _max = 0.4
 
 
 class Gear5(Allele):
+    """Allele for 5th gear ratio (min/max)."""
     _min = 0.5
     _max = 2.25
 
 
 class Delta54(Allele):
+    """Allele for delta(5→4) (min/max)."""
     _min = 0.1
     _max = 0.5
 
 
 class Delta43(Allele):
+    """Allele for delta(4→3) (min/max)."""
     _min = 0.1
     _max = 0.5
 
 
 class Car(Individual):
+    """Individual blueprint using delta re-parametrization."""
     _Blueprint = {
-        # Genotyp: [fd, rr, gear5, Δ54, Δ43]
-        'genotype': [FinalDrive, RollRadius, Gear5, Delta54, Delta43],
-        'genotype_labels': ['Final Drive', 'Roll Radius', 'Gear 5', 'Delta 5→4', 'Delta 4→3'],
-        # WICHTIG: Alle Ziele werden minimiert (Consumption, E3, E4, E5)
-        'goals': ['minimize', 'minimize', 'minimize', 'minimize'],
-        'phenotype_labels': ['Consumption', 'Elasticity 3', 'Elasticity 4', 'Elasticity 5'],
+        "genotype": [FinalDrive, RollRadius, Gear5, Delta54, Delta43],
+        "genotype_labels": ["Final Drive", "Roll Radius", "Gear 5", "Delta 5→4", "Delta 4→3"],
+        "goals": ["minimize", "minimize", "minimize", "minimize"],
+        "phenotype_labels": ["Consumption", "Elasticity 3", "Elasticity 4", "Elasticity 5"],
     }
 
     def _calculate_phenotype(self):
-        # Platzhalter – Bewertung erfolgt extern via eval_function
-        return tuple([0.0] * len(self._Blueprint['goals']))
+        """Placeholder; evaluation is handled externally via `eval_function`."""
+        return tuple([0.0] * len(self._Blueprint["goals"]))
 
     def _enforce_constraints(self):
-        # Genotyp-seitige Constraints nicht nötig – Mapping per enforce_gear_descending in eval_function
+        """No genotype-side constraints; mapping is handled in `eval_function`."""
         return
 
 
-# ---------------------------
-# NSGA-II Core
-# ---------------------------
-
 class Nsga2(EvolutionStrategy):
+    """Core NSGA-II strategy."""
+
     def __init__(self, population: Population, eval_function, on_update_metrics=None, **kwargs: dict):
-        """
-        eval_function erwartet Signatur: eval_function(individual, genotype_values) -> phenotype_tuple
-        on_update_metrics: optionaler Callback, der eine Liste von Individuals erhält,
-                           nachdem Rank & Crowding Distance berechnet wurden (für Logging).
+        """Initialize with population and evaluation callback.
+
+        Args:
+            population: Initial population.
+            eval_function: Callable (individual, genotype_values) -> phenotype tuple.
+            on_update_metrics: Optional callback receiving individuals after rank/crowding update.
         """
         super().__init__(population, **kwargs)
         self.eval_function = eval_function
@@ -77,19 +80,17 @@ class Nsga2(EvolutionStrategy):
         if not self.eval_function:
             raise ValueError("NSGA-II Strategy requires an 'eval_function'.")
 
-        # SBX/Polynomial Mutation Parameter
-        self.eta_crossover = kwargs.get('eta_crossover', 15)
-        self.eta_mutation = kwargs.get('eta_mutation', 20)
-        self.pmut = kwargs.get('pmut', 0.1)
-        self.crossover_prob = kwargs.get('crossover_prob', 0.9)
+        self.eta_crossover = kwargs.get("eta_crossover", 15)
+        self.eta_mutation = kwargs.get("eta_mutation", 20)
+        self.pmut = kwargs.get("pmut", 0.1)
+        self.crossover_prob = kwargs.get("crossover_prob", 0.9)
 
-        blueprint = self.population._IndividualClass._Blueprint['genotype']
+        blueprint = self.population._IndividualClass._Blueprint["genotype"]
         self.bounds_low = np.array([allele_type._min for allele_type in blueprint], dtype=float)
         self.bounds_high = np.array([allele_type._max for allele_type in blueprint], dtype=float)
 
-        # Initiale Bewertung
         for ind in self.population:
-            if not getattr(ind, 'is_evaluated', False):
+            if not getattr(ind, "is_evaluated", False):
                 ind.phenotype = self.eval_function(ind, ind.get_genotype(transform=True))
                 ind.is_evaluated = True
 
@@ -97,16 +98,15 @@ class Nsga2(EvolutionStrategy):
         for front in initial_fronts:
             self._calculate_crowding_distance(front)
 
-        # Nach Initialisierung: Metriken melden (Rank & Crowding für die aktuelle Population)
         self._notify_update(list(self.population))
 
-    # ---------------- interne Utility ----------------
     def _notify_update(self, individuals: List[Individual]):
+        """Invoke the metrics callback if provided."""
         if callable(self._on_update_metrics):
             self._on_update_metrics(individuals)
 
-    # ---------------- Selection (Binary Tournament: rank, then crowding) ----------------
     def _selection(self) -> Population:
+        """Binary tournament selection on (rank, crowding)."""
         selected_parents_list = []
         population_list = list(self.population)
         for _ in range(self.population_size):
@@ -117,11 +117,11 @@ class Nsga2(EvolutionStrategy):
                 selected_parents_list.append(p2)
         return Population(individuals=selected_parents_list, individual_class=self.population._IndividualClass)
 
-    # ---------------- Recombination (SBX) ----------------
     def _recombination(self, parents: Population) -> Population:
+        """SBX recombination."""
         offspring_list = []
         parent_list = list(parents)
-        genotype_blueprint = self.population._IndividualClass._Blueprint['genotype']
+        genotype_blueprint = self.population._IndividualClass._Blueprint["genotype"]
 
         for i in range(0, self.population_size, 2):
             parent1 = parent_list[i]
@@ -173,10 +173,10 @@ class Nsga2(EvolutionStrategy):
 
         return Population(individuals=offspring_list, individual_class=self.population._IndividualClass)
 
-    # ---------------- Mutation (Polynomial) ----------------
     def _mutation(self, offspring: Population) -> Population:
+        """Polynomial mutation."""
         mutated_offspring_list = []
-        genotype_blueprint = self.population._IndividualClass._Blueprint['genotype']
+        genotype_blueprint = self.population._IndividualClass._Blueprint["genotype"]
 
         for individual in offspring:
             mutated_genotype_values = list(individual.get_genotype(transform=True))
@@ -208,13 +208,12 @@ class Nsga2(EvolutionStrategy):
 
         return Population(individuals=mutated_offspring_list, individual_class=self.population._IndividualClass)
 
-    # ---------------- Environmental Selection ----------------
     def _create_new_generation(self, offspring: Population) -> Population:
+        """Environmental selection to form the next generation."""
         combined_population = list(self.population) + list(offspring)
 
-        # (Re-)Evaluate any new individuals that lack phenotype
         for ind in combined_population:
-            if not getattr(ind, 'is_evaluated', False) or ind.phenotype is None:
+            if not getattr(ind, "is_evaluated", False) or ind.phenotype is None:
                 ind.phenotype = self.eval_function(ind, ind.get_genotype(transform=True))
                 ind.is_evaluated = True
 
@@ -234,17 +233,15 @@ class Nsga2(EvolutionStrategy):
             num_to_add = self.population_size - len(next_generation_individuals)
             next_generation_individuals.extend(remaining_front[:num_to_add])
 
-        # Vor Rückgabe: aktuelle Metriken der neuen Population melden (für Logging)
         self._notify_update(next_generation_individuals)
-
         return Population(individuals=next_generation_individuals, individual_class=self.population._IndividualClass)
 
-    # ---------------- NSGA-II Utilities ----------------
     def _is_dominated(self, p_phenotype, q_phenotype):
-        # Minimization assumed
+        """Return True if p is dominated by q (minimization)."""
         return all(p_val >= q_val for p_val, q_val in zip(p_phenotype, q_phenotype)) and any(p_val > q_val for p_val, q_val in zip(p_phenotype, q_phenotype))
 
     def _fast_non_dominated_sort(self, population_list: List[Individual]) -> List[List[Individual]]:
+        """Efficient non-dominated sorting producing Pareto fronts."""
         fronts = [[]]
         for p in population_list:
             p.domination_count = 0
@@ -280,11 +277,12 @@ class Nsga2(EvolutionStrategy):
         return fronts
 
     def _calculate_crowding_distance(self, front: List[Individual]):
+        """Compute crowding distance within a front."""
         if not front:
             return
         if len(front) <= 2:
             for ind in front:
-                ind.crowding_distance = float('inf')
+                ind.crowding_distance = float("inf")
             return
 
         num_objectives = len(front[0].phenotype)
@@ -296,18 +294,16 @@ class Nsga2(EvolutionStrategy):
             f_min, f_max = front[0].phenotype[m], front[-1].phenotype[m]
             if f_max == f_min:
                 continue
-            front[0].crowding_distance = float('inf')
-            front[-1].crowding_distance = float('inf')
+            front[0].crowding_distance = float("inf")
+            front[-1].crowding_distance = float("inf")
             for i in range(1, len(front) - 1):
                 distance = front[i + 1].phenotype[m] - front[i - 1].phenotype[m]
                 front[i].crowding_distance += distance / (f_max - f_min)
 
 
-# ---------------------------
-# Algorithm Wrapper
-# ---------------------------
-
 class Nsga2Algorithm:
+    """High-level NSGA-II wrapper with unified reward/validity handling."""
+
     def __init__(self, env, search_space, **kwargs):
         self.env = env
         self.search_space = search_space
@@ -318,76 +314,61 @@ class Nsga2Algorithm:
 
         self.pop_size = int(kwargs.get("pop_size", 40))
         self.generations_hint = int(kwargs.get("generations", 0))
-        self.use_constraints = bool(kwargs.get('use_constraints', True))
+        self.use_constraints = bool(kwargs.get("use_constraints", True))
 
-        # Einheitliche Reward/Valid-Logik (keine TB-Visualisierung, kein Referenzpunkt im Log)
-        self.rl_reward_cfg: Dict[str, Any] = kwargs.get('rl_reward', {"type": "heuristic"})
+        self.rl_reward_cfg: Dict[str, Any] = kwargs.get("rl_reward", {"type": "heuristic"})
 
-        # globaler Eval-Zähler (zählt ausschließlich GÜLTIGE Punkte)
         self.eval_count: int = 0
-        self._generation: int = 0  # Generation 0 = Initialpopulation
+        self._generation: int = 0
 
-        # Cache ungültiger Aktionen (nach Constraints), deterministisch
         self.invalid_actions: Set[Tuple[float, ...]] = set()
 
-        # bounds für Resampling (aus Blueprint)
-        blueprint = Car._Blueprint['genotype']
+        blueprint = Car._Blueprint["genotype"]
         self.bounds_low = np.array([allele_type._min for allele_type in blueprint], dtype=float)
         self.bounds_high = np.array([allele_type._max for allele_type in blueprint], dtype=float)
 
         def _is_valid_sim(sim: Tuple[float, float, float, float]) -> bool:
-            """Erlaubt negative Zielwerte; verwirft nur NaN/Inf."""
+            """Return True iff all objective values are finite; negatives are allowed."""
             arr = np.asarray(sim, dtype=np.float64)
             return np.isfinite(arr).all()
 
         def _action_key(x_env: np.ndarray, decimals: int = 6) -> Tuple[float, ...]:
+            """Stable key for caching actions with limited precision."""
             return tuple(np.round(np.asarray(x_env, dtype=np.float64), decimals=decimals).tolist())
 
         def _resample_genotype(max_tries: int = 1000) -> np.ndarray:
-            """Uniformes Resampling innerhalb der Suchgrenzen."""
+            """Uniform resampling within bounds that avoids known invalid actions."""
             for _ in range(max_tries):
                 x = np.random.uniform(self.bounds_low, self.bounds_high).astype(np.float64)
                 xx = enforce_gear_descending(x, self.search_space) if self.use_constraints else x
                 if _action_key(xx) not in self.invalid_actions:
                     return x
-            # Letzter Ausweg (selten): trotzdem zurückgeben, wird später nochmals geprüft
             return np.random.uniform(self.bounds_low, self.bounds_high).astype(np.float64)
 
         def eval_fn(ind: Individual, genotype_values: List[float]):
-            """
-            Bewertungsfunktion mit striktem Invalid-Filtering:
-              - Nur nicht-endliche (NaN/Inf) Ziele -> VERWERFEN (kein Log, kein Budget)
-              - deterministische Invalids werden gecached und in Zukunft übersprungen
-              - falls nötig wird intern neu gesampelt, bis ein valider Punkt gefunden ist
-            """
+            """Evaluation with strict invalid filtering and unified reward logging."""
             attempts = 0
             max_attempts = 1000
 
             while True:
-                # 1) Kandidat bestimmen: erst Original, dann Resampling
                 if attempts == 0:
                     x = np.array(genotype_values, dtype=np.float64)
                 else:
                     x = _resample_genotype()
 
-                # 2) Constraints
                 x_env = enforce_gear_descending(x, self.search_space) if self.use_constraints else x
                 key = _action_key(x_env)
 
-                # 3) Bekannter Invalid?
                 if key in self.invalid_actions:
                     attempts += 1
                     if attempts >= max_attempts:
-                        # Notbremse: starte neuen Versuch nächste Runde
                         attempts = 0
                     continue
 
-                # 4) Simulator
                 t0 = time.perf_counter()
                 consumption, e3, e4, e5 = self.env.step(x_env)
                 t_env_ms = (time.perf_counter() - t0) * 1000.0
 
-                # 5) Validierung (nur Endlichkeit)
                 if not _is_valid_sim((consumption, e3, e4, e5)):
                     self.invalid_actions.add(key)
                     attempts += 1
@@ -395,80 +376,68 @@ class Nsga2Algorithm:
                         attempts = 0
                     continue
 
-                # --- gültiger Punkt ---
                 rew = rl_reward((consumption, e3, e4, e5), self.rl_reward_cfg)
                 valid_flag = bool(is_terminal((consumption, e3, e4, e5), self.rl_reward_cfg))
 
-                # Budget/Logging nur für gültige Punkte
                 self.eval_count += 1
                 log_idx = len(self.results_list)
                 setattr(ind, "_last_log_idx", log_idx)
 
                 self.results_list.append({
-                    'algo': self.algo_name,
-                    'seed': self.seed,
-                    'evaluation': int(self.eval_count),
-                    'timestamp': time.time(),
-                    't_env_ms': float(t_env_ms),
-
-                    'p1_final_drive_ratio': float(x_env[0]),
-                    'p2_roll_radius': float(x_env[1]),
-                    'p3_gear3_diff': float(x_env[2]),
-                    'p4_gear4_diff': float(x_env[3]),
-                    'p5_gear5': float(x_env[4]),
-
-                    'consumption': float(consumption),
-                    'ela3': float(e3),
-                    'ela4': float(e4),
-                    'ela5': float(e5),
-
-                    'reward': float(rew),        # einziges Score-Feld
-                    'phase': 'init' if self._generation == 0 else 'generation',
-                    'generation': int(self._generation),
-
-                    'valid': valid_flag,         # Treffer in Target-Box?
-
-                    # werden nach Non-Dominated Sorting & Crowding gesetzt
-                    'rank': None,
-                    'crowding_distance': None,
+                    "algo": self.algo_name,
+                    "seed": self.seed,
+                    "evaluation": int(self.eval_count),
+                    "timestamp": time.time(),
+                    "t_env_ms": float(t_env_ms),
+                    "p1_final_drive_ratio": float(x_env[0]),
+                    "p2_roll_radius": float(x_env[1]),
+                    "p3_gear3_diff": float(x_env[2]),
+                    "p4_gear4_diff": float(x_env[3]),
+                    "p5_gear5": float(x_env[4]),
+                    "consumption": float(consumption),
+                    "ela3": float(e3),
+                    "ela4": float(e4),
+                    "ela5": float(e5),
+                    "reward": float(rew),
+                    "phase": "init" if self._generation == 0 else "generation",
+                    "generation": int(self._generation),
+                    "valid": valid_flag,
+                    "rank": None,
+                    "crowding_distance": None,
                 })
 
-                # Multiobjektive Fitness (alle Ziele MIN)
                 return (consumption, e3, e4, e5)
 
-        # Callback: Rank & Crowding ins Log schreiben
         def on_update_metrics(individuals: List[Individual]):
+            """Write rank and crowding distance back into the latest logs."""
             for ind in individuals:
                 idx = getattr(ind, "_last_log_idx", None)
                 if idx is None:
                     continue
                 if 0 <= idx < len(self.results_list):
-                    self.results_list[idx]['rank'] = int(getattr(ind, 'rank', -1)) if hasattr(ind, 'rank') else None
-                    cd = getattr(ind, 'crowding_distance', None)
-                    self.results_list[idx]['crowding_distance'] = float(cd) if cd is not None else None
+                    self.results_list[idx]["rank"] = int(getattr(ind, "rank", -1)) if hasattr(ind, "rank") else None
+                    cd = getattr(ind, "crowding_distance", None)
+                    self.results_list[idx]["crowding_distance"] = float(cd) if cd is not None else None
 
-        # Population erzeugen & NSGA-II Kern
         self.population = Population(size=self.pop_size, individual_class=Car)
 
-        # Unnötige Keys filtern (kein TensorBoard)
         passthrough = {
             k: v for k, v in kwargs.items()
             if k not in {"pop_size", "generations", "seed", "use_constraints", "rl_reward"}
         }
 
-        # WICHTIG: _generation vor erstem eval_fn-Call definieren
         self._generation = 0
         self.core = Nsga2(
             population=self.population,
             eval_function=eval_fn,
             on_update_metrics=on_update_metrics,
-            **passthrough
+            **passthrough,
         )
 
     def run(self, budget: int):
+        """Run evolution for as many full generations as fit into the budget."""
         if budget <= 0:
             return
-        # Nur GÜLTIGE Logs zählen
         already = len(self.results_list)
         remaining = max(0, budget - already)
         generations = remaining // self.pop_size
