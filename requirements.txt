@@ -1,4 +1,12 @@
+# Core scientific stack
 numpy
 pandas
+matplotlib
+scipy
 tensorflow
-tensorflow-probability
+tensorflow_probability
+optuna
+pygmo
+flatbuffers
+tf_keras
+tqdm

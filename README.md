@@ -76,7 +76,7 @@ The workflow consists of three stages:
   - Run the main function in `run_experiment.py`:
     ```python
     if __name__ == '__main__':
-        main(["AL", "NSGA2"])
+        main(["AL", "GA"])
     ```
   - Possible values:  
     **`["SAC"]`**, **`["A3C"]`**, **`["AL"]`**, **`["GA"]`**  
